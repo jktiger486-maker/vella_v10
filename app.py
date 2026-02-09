@@ -14,9 +14,10 @@ from binance.client import Client
 from binance.enums import SIDE_BUY, SIDE_SELL, ORDER_TYPE_MARKET
 
 # ============================================================
-# CFG — 번호 대역 기준 구조 (READ ONLY)
+# CFG
 # ============================================================
 # 2026_0209_1600 : 기본 ema 5 > 15 엔트리 5 > 10 엑시트 조건
+
 CFG = {
     # BASIC
     "TRADE_SYMBOL": "RAREUSDT",
