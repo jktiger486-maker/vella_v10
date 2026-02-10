@@ -13,7 +13,7 @@ import signal
 import logging
 import requests
 from decimal import Decimal, ROUND_DOWN
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Optional, Dict, Any, List
 
 # ============================================================
@@ -39,7 +39,7 @@ CFG = {
 
     "13_PULLBACK_N": 8,          # 눌림 허용 봉수
     "14_SLOPE_BARS": 5,          # EMA10 기울기 비교 봉수
-    "15_SPREAD_MIN": 0.0004,     # EMA10-EMA20 최소 확장값 (절대값)
+    "15_SPREAD_MIN": 0.0004,     # EMA10-EMA20 최소 확장 비율 (ratio, 예: 0.0004 = 0.04%)
     "16_PEAK_BARS": 30,          # EMA10 고점(최근 N봉 최고) 확인
 
     # -------------------------
@@ -88,14 +88,14 @@ log = logging.getLogger("VELLA_v10_LONG")
 
 try:
     from binance.client import Client
-    from binance.enums import SIDE_BUY, SIDE_SELL, FUTURE_ORDER_TYPE_MARKET
+    from binance.enums import SIDE_BUY, SIDE_SELL, ORDER_TYPE_MARKET
 except Exception:
     Client = None
     SIDE_BUY = "BUY"
     SIDE_SELL = "SELL"
-    FUTURE_ORDER_TYPE_MARKET = "MARKET"
+    ORDER_TYPE_MARKET = "MARKET"
 
-BINANCE_SPOT_KLINES = "https://api.binance.com/api/v3/klines"
+BINANCE_FUTURES_KLINES = "https://fapi.binance.com/fapi/v1/klines"
 
 def init_client() -> "Client":
     if Client is None:
@@ -113,20 +113,20 @@ def set_leverage(client: "Client", symbol: str, leverage: int) -> None:
         # leverage set can fail if already set or symbol restrictions; do not crash engine
         log.error(f"set_leverage failed: {e}")
 
-def fetch_klines_spot(symbol: str, interval: str, limit: int) -> Optional[List[Any]]:
-    # NOTE: v9 used spot klines endpoint for signal time-axis (closed bars).
-    # For Futures, spot klines are fine as a deterministic bar feed for many USDT symbols.
+# [수정]
+def fetch_klines_futures(symbol: str, interval: str, limit: int) -> Optional[List[Any]]:
     try:
         r = requests.get(
-            BINANCE_SPOT_KLINES,
+            BINANCE_FUTURES_KLINES,
             params={"symbol": symbol, "interval": interval, "limit": limit},
             timeout=5,
         )
         r.raise_for_status()
         return r.json()
     except Exception as e:
-        log.error(f"fetch_klines_spot: {e}")
+        log.error(f"fetch_klines_futures: {e}")
         return None
+
 
 def get_futures_lot_size(client: "Client", symbol: str) -> Optional[Dict[str, Decimal]]:
     try:
@@ -211,12 +211,14 @@ class ClaudeEntryState:
     deep_seen: bool = False
     bars_since_deep: int = 999
 
+from dataclasses import dataclass, field
+
 @dataclass
 class EngineState:
     bar: int = 0
     last_open_time: Optional[int] = None
     cooldown_until_bar: int = 0
-    entry_state: ClaudeEntryState = ClaudeEntryState()
+    entry_state: ClaudeEntryState = field(default_factory=ClaudeEntryState)
     position: Optional[Position] = None
     close_history: List[float] = None
     low_history: List[float] = None
@@ -384,8 +386,8 @@ def place_long_entry(client: "Client", symbol: str, capital_usdt: float, lot: Di
 
         client.futures_create_order(
             symbol=symbol,
-            side=SIDE_BUY,  # LONG entry
-            type=FUTURE_ORDER_TYPE_MARKET,
+            side=SIDE_BUY,
+            type=ORDER_TYPE_MARKET,
             quantity=qty,
         )
 
@@ -407,8 +409,8 @@ def place_long_exit(client: "Client", symbol: str, qty: float, lot: Dict[str, De
 
         client.futures_create_order(
             symbol=symbol,
-            side=SIDE_SELL,  # LONG exit
-            type=FUTURE_ORDER_TYPE_MARKET,
+            side=SIDE_SELL,
+            type=ORDER_TYPE_MARKET,
             quantity=qty_rounded,
             reduceOnly=True
         )
@@ -446,7 +448,7 @@ def engine():
 
     while not STOP:
         try:
-            kl = fetch_klines_spot(symbol, interval, int(CFG["90_KLINE_LIMIT"]))
+            kl = fetch_klines_futures(symbol, interval, int(CFG["90_KLINE_LIMIT"]))    
             if not kl:
                 time.sleep(CFG["91_POLL_SEC"])
                 continue
@@ -458,12 +460,22 @@ def engine():
                 time.sleep(CFG["91_POLL_SEC"])
                 continue
 
+            # ===============================
+            # COLD START SEED (RUN ONCE)
+            # ===============================
+            if not st.close_history:
+                for k in kl[:-1]:  # 마지막(현재 미완성봉) 제외, 완료봉만
+                    st.close_history.append(float(k[4]))
+                    st.low_history.append(float(k[3]))
+                st.bar = len(st.close_history)
+                st.last_open_time = int(kl[-2][0])
+                continue
+
             st.last_open_time = open_time
             st.bar += 1
 
             close = float(completed[4])
             low = float(completed[3])
-
             st.close_history.append(close)
             st.low_history.append(low)
 
@@ -486,7 +498,6 @@ def engine():
             if st.position is None:
                 # cooldown check
                 if st.bar < st.cooldown_until_bar:
-                    log.info(f"[WAIT] cooldown bars remaining={st.cooldown_until_bar - st.bar}")
                     continue
 
                 # ENTRY SIGNAL
@@ -510,8 +521,7 @@ def engine():
                     else:
                         log.error("[ENTRY_FAIL] order failed")
                 else:
-                    # optional: lightweight trace
-                    log.info(f"[NO_ENTRY] bar={st.bar} close={close}")
+                    pass
             else:
                 # avoid same-bar entry-exit
                 if st.position.entry_bar == st.bar:
@@ -530,7 +540,7 @@ def engine():
                     else:
                         log.error("[EXIT_FAIL] order failed (kept position)")
                 else:
-                    log.info(f"[HOLD] bar={st.bar} close={close} entry={st.position.entry_price}")
+                    pass
 
         except Exception as e:
             log.error(f"engine loop error: {e}")
