@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 # ============================================================
 # VELLA_v10 — LONG ENGINE (Binance Futures)
 # - EXECUTION CORE: based on v9 proven trade plumbing (lotSize/qty/order/reduceOnly/closed-bar loop)
@@ -20,6 +19,7 @@ from typing import Optional, Dict, Any, List
 # ============================================================
 # CFG (ALL CONTROL HERE)
 # ============================================================
+# 20260210_1730 : 클롣드 엔트리 + 벨라 n봉 엑시트 기본 매매확인후 필터 추가
 
 CFG = {
     # -------------------------
