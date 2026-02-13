@@ -1,7 +1,7 @@
 # ============================================================
-# VELLA_v10 — LONG ENGINE (Binance Futures)
+# VELLA_v10_BASE — EXPERIMENTAL MODE (EMA3 Cross Only)
 # - EXECUTION CORE: based on v9 proven trade plumbing (lotSize/qty/order/reduceOnly/closed-bar loop)
-# - ENTRY: Claude v11 philosophy (EMA10/15/20 stack + spread + slope + peak + deep pullback within N bars + 1-shot per trend cycle)
+# - ENTRY: PURE EMA10/15/20 cross (NO filters, NO pullback, NO slope, NO peak)
 # - EXIT: Bella rule (close < avg(prev N closed closes))  [default N=2, CFG adjustable]
 # - TIME AXIS: REST closed-bar only (kline[-2])
 # ============================================================
@@ -19,7 +19,8 @@ from typing import Optional, Dict, Any, List
 # ============================================================
 # CFG (ALL CONTROL HERE)
 # ============================================================
-# 20260210_1730 : 클롣드 엔트리 + 벨라 n봉 엑시트 기본 매매확인후 필터 추가
+# 20250210_BASE: 완전 단순 EMA3선 교차 실험 모드
+# 목표: 필터 없는 순수 EMA 교차 엣지 측정
 
 CFG = {
     # -------------------------
@@ -31,27 +32,21 @@ CFG = {
     "04_LEVERAGE": 1,
 
     # -------------------------
-    # ENTRY (Claude v11)
+    # ENTRY (BASE MODE - EMA3 Cross Only)
     # -------------------------
     "10_EMA_FAST": 10,
     "11_EMA_MID": 15,
     "12_EMA_SLOW": 20,
 
-    "13_PULLBACK_N": 8,          # 눌림 허용 봉수
-    "14_SLOPE_BARS": 5,          # EMA10 기울기 비교 봉수
-    "15_SPREAD_MIN": 0.0004,     # EMA10-EMA20 최소 확장 비율 (ratio, 예: 0.0004 = 0.04%)
-    "16_PEAK_BARS": 30,          # EMA10 고점(최근 N봉 최고) 확인
-
     # -------------------------
     # ENTRY MANAGEMENT FILTERS (plug-in slots)
     # -------------------------
     "20_ENTRY_COOLDOWN_BARS": 0,     # 엔트리/엑시트 후 재진입 쿨다운(봉수)
-    "21_MAX_ENTRY_PER_TREND": 1,     # 추세 사이클당 1회(기본 1; Claude 철학)
 
     # -------------------------
     # EXIT (Bella)
     # -------------------------
-    "30_EXIT_AVG_N": 2,              # 기본값 2, CFG로 조정
+    "30_EXIT_AVG_N": 3,              # 기본값 2, CFG로 조정
     "31_EXIT_USE_PREV_N_ONLY": True, # True: avg=prev N closes(현재봉 제외). False면 포함(권장X)
 
     # -------------------------
@@ -66,7 +61,7 @@ CFG = {
     # -------------------------
     # ENGINE
     # -------------------------
-    "90_KLINE_LIMIT": 240,            # 충분히 크게(EMA/Peak 위해)
+    "90_KLINE_LIMIT": 1500,            # 충분히 크게(EMA 계산용)
     "91_POLL_SEC": 7,                 # 완료봉 갱신 체크 주기
     "92_LOG_LEVEL": "INFO",           # INFO/ERROR
 }
@@ -80,7 +75,7 @@ logging.basicConfig(
     format="%(asctime)s [%(levelname)s] %(message)s",
     handlers=[logging.StreamHandler(sys.stdout)],
 )
-log = logging.getLogger("VELLA_v10_LONG")
+log = logging.getLogger("VELLA_v10_BASE")
 
 # ============================================================
 # BINANCE (v9 style)
@@ -110,10 +105,8 @@ def set_leverage(client: "Client", symbol: str, leverage: int) -> None:
     try:
         client.futures_change_leverage(symbol=symbol, leverage=leverage)
     except Exception as e:
-        # leverage set can fail if already set or symbol restrictions; do not crash engine
         log.error(f"set_leverage failed: {e}")
 
-# [수정]
 def fetch_klines_futures(symbol: str, interval: str, limit: int) -> Optional[List[Any]]:
     try:
         r = requests.get(
@@ -126,7 +119,6 @@ def fetch_klines_futures(symbol: str, interval: str, limit: int) -> Optional[Lis
     except Exception as e:
         log.error(f"fetch_klines_futures: {e}")
         return None
-
 
 def get_futures_lot_size(client: "Client", symbol: str) -> Optional[Dict[str, Decimal]]:
     try:
@@ -176,7 +168,6 @@ def ema_series(values: List[float], period: int) -> List[float]:
     if not values:
         return []
     if len(values) < period:
-        # not enough, return flat warmup series
         return [values[0]] * len(values)
 
     k = 2 / (period + 1)
@@ -189,7 +180,6 @@ def ema_series(values: List[float], period: int) -> List[float]:
         prev = (values[i] * k) + (prev * (1 - k))
         out[i] = prev
 
-    # fill warm-up head with first computed SMA (more stable than raw)
     for i in range(period - 1):
         out[i] = out[period - 1]
     return out
@@ -200,110 +190,74 @@ def ema_series(values: List[float], period: int) -> List[float]:
 
 @dataclass
 class Position:
-    side: str               # "LONG"
+    side: str               # "LONG" or "SHORT"
     entry_price: float
     qty: float
     entry_bar: int
-
-@dataclass
-class ClaudeEntryState:
-    entry_fired: bool = False
-    deep_seen: bool = False
-    bars_since_deep: int = 999
-
-from dataclasses import dataclass, field
 
 @dataclass
 class EngineState:
     bar: int = 0
     last_open_time: Optional[int] = None
     cooldown_until_bar: int = 0
-    entry_state: ClaudeEntryState = field(default_factory=ClaudeEntryState)
     position: Optional[Position] = None
-    close_history: List[float] = None
-    low_history: List[float] = None
-
-    def __post_init__(self):
-        self.close_history = []
-        self.low_history = []
+    close_history: List[float] = field(default_factory=list)
 
 # ============================================================
-# ENTRY (Claude v11)
+# ENTRY (BASE MODE - PURE EMA3 CROSS)
 # ============================================================
 
-def claude_entry_signal(
-    closes: List[float],
-    lows: List[float],
-    st: ClaudeEntryState
-) -> bool:
+def base_entry_signal(closes: List[float]) -> Optional[str]:
     """
-    Uses last closed bar only (already supplied as histories of closed bars).
-    Claude v11 philosophy:
-      - stack: EMA10 > EMA15 > EMA20
-      - spread: EMA10-EMA20 >= SPREAD_MIN
-      - slope: EMA10_now > EMA10[past slope_bars]
-      - peak: EMA10_now >= highest EMA10 over PEAK_BARS
-      - deep pullback happened: low <= EMA20, then entry within PULLBACK_N bars
-      - cycle entry 1-shot: entry_fired blocks until stack breaks
-      - final trigger: close > EMA10
+    완전 단순 EMA10/15/20 교차 시그널 (필터 없음)
+    
+    Returns:
+        "LONG"  : EMA10 crosses above EMA15 AND EMA15 > EMA20
+        "SHORT" : EMA10 crosses below EMA15 AND EMA15 < EMA20
+        None    : no signal
+    
+    Cross 정의:
+        LONG:
+            prev: ema10[-2] <= ema15[-2]
+            now:  ema10[-1] > ema15[-1]
+            AND ema15[-1] > ema20[-1]
+        
+        SHORT:
+            prev: ema10[-2] >= ema15[-2]
+            now:  ema10[-1] < ema15[-1]
+            AND ema15[-1] < ema20[-1]
     """
-    if len(closes) < max(CFG["16_PEAK_BARS"], 60):
-        return False
+    if len(closes) < 60:  # EMA20 안정화용 최소 데이터
+        return None
 
     ema10_s = ema_series(closes, CFG["10_EMA_FAST"])
     ema15_s = ema_series(closes, CFG["11_EMA_MID"])
     ema20_s = ema_series(closes, CFG["12_EMA_SLOW"])
 
-    ema10 = ema10_s[-1]
-    ema15 = ema15_s[-1]
-    ema20 = ema20_s[-1]
-    close = closes[-1]
-    low = lows[-1]
+    # 현재봉 (마지막 완료봉)
+    ema10_now = ema10_s[-1]
+    ema15_now = ema15_s[-1]
+    ema20_now = ema20_s[-1]
 
-    stack_now = (ema10 > ema15) and (ema15 > ema20)
-    if not stack_now:
-        # reset cycle
-        st.entry_fired = False
-        st.deep_seen = False
-        st.bars_since_deep = 999
-        return False
+    # 이전봉
+    ema10_prev = ema10_s[-2]
+    ema15_prev = ema15_s[-2]
 
-    spread_ratio = (ema10 - ema20) / ema20
-    spread_ok = spread_ratio >= float(CFG["15_SPREAD_MIN"])
+    # LONG 시그널
+    cross_up = (ema10_prev <= ema15_prev) and (ema10_now > ema15_now)
+    stack_long = ema15_now > ema20_now
+    
+    if cross_up and stack_long:
+        return "LONG"
 
-    slope_bars = int(CFG["14_SLOPE_BARS"])
-    if len(ema10_s) < slope_bars + 1:
-        return False
-    slope_ok = ema10 > ema10_s[-1 - slope_bars]
+    # SHORT 시그널
+    cross_down = (ema10_prev >= ema15_prev) and (ema10_now < ema15_now)
+    stack_short = ema15_now < ema20_now
+    
+    if cross_down and stack_short:
+        return "SHORT"
 
-    peak_bars = int(CFG["16_PEAK_BARS"])
-    ema10_peak = max(ema10_s[-peak_bars:])
-    peak_ok = ema10 >= ema10_peak
-
-    # Deep pullback tracking (low <= ema20)
-    if low <= ema20:
-        st.bars_since_deep = 0
-        st.deep_seen = True
-    else:
-        st.bars_since_deep += 1
-
-    recent_deep_ok = st.deep_seen and (st.bars_since_deep <= int(CFG["13_PULLBACK_N"]))
-
-    # 1-shot per trend cycle
-    if int(CFG["21_MAX_ENTRY_PER_TREND"]) <= 0:
-        # safety: no entries
-        return False
-
-    if st.entry_fired:
-        return False
-
-    entry_raw = stack_now and spread_ok and slope_ok and peak_ok and recent_deep_ok and (close > ema10)
-    return bool(entry_raw)
-
-def on_entry_fired(st: ClaudeEntryState) -> None:
-    st.entry_fired = True
-    st.deep_seen = False
-    st.bars_since_deep = 999
+    return None
 
 # ============================================================
 # EXIT (Bella core + options)
@@ -326,16 +280,18 @@ def bella_exit_core_avg_break(closes: List[float], n: int) -> bool:
         prev = closes[-(n + 1):-1]
         avg = sum(prev) / n
     else:
-        # not recommended, but allowed
         avg = sum(closes[-n:]) / n
 
     return current < avg
 
-def exit_option_sl(close: float, entry_price: float) -> bool:
+def exit_option_sl(close: float, entry_price: float, side: str) -> bool:
     if not CFG["40_SL_ENABLE"]:
         return False
     sl = float(CFG["41_SL_PCT"]) / 100.0
-    return close <= entry_price * (1.0 - sl)
+    if side == "LONG":
+        return close <= entry_price * (1.0 - sl)
+    else:  # SHORT
+        return close >= entry_price * (1.0 + sl)
 
 def exit_option_timeout(current_bar: int, entry_bar: int) -> bool:
     if not CFG["50_TIMEOUT_EXIT_ENABLE"]:
@@ -355,7 +311,7 @@ def exit_signal(state: EngineState) -> bool:
 
     close = state.close_history[-1]
 
-    if exit_option_sl(close, pos.entry_price):
+    if exit_option_sl(close, pos.entry_price, pos.side):
         return True
     if exit_option_timeout(state.bar, pos.entry_bar):
         return True
@@ -401,7 +357,6 @@ def place_long_exit(client: "Client", symbol: str, qty: float, lot: Dict[str, De
     Long close = SELL with reduceOnly=True
     """
     try:
-        # Re-round qty defensively
         qty_rounded = calculate_quantity(qty, lot)
         if qty_rounded is None:
             log.error("exit: qty too small (minQty) — cannot close")
@@ -444,7 +399,7 @@ def engine():
 
     st = EngineState()
 
-    log.info(f"START v10 LONG | symbol={symbol} interval={interval} capital={capital} lev={CFG['04_LEVERAGE']}")
+    log.info(f"START v10_BASE (EMA3 CROSS) | symbol={symbol} interval={interval} capital={capital} lev={CFG['04_LEVERAGE']}")
 
     while not STOP:
         try:
@@ -466,31 +421,20 @@ def engine():
             if not st.close_history:
                 for k in kl[:-1]:  # 마지막(현재 미완성봉) 제외, 완료봉만
                     st.close_history.append(float(k[4]))
-                    st.low_history.append(float(k[3]))
                 st.bar = len(st.close_history)
                 st.last_open_time = int(kl[-2][0])
+                log.info(f"COLD START: loaded {st.bar} bars")
                 continue
 
             st.last_open_time = open_time
             st.bar += 1
 
             close = float(completed[4])
-            low = float(completed[3])
             st.close_history.append(close)
-            st.low_history.append(low)
 
             # keep history bounded
             if len(st.close_history) > 2000:
                 st.close_history = st.close_history[-2000:]
-                st.low_history = st.low_history[-2000:]
-
-            # -------------------------
-            # ENTRY MANAGEMENT FILTERS (cooldown)
-            # -------------------------
-            if st.bar < st.cooldown_until_bar:
-                # still update Claude state via claude_entry_signal call? -> No: avoid state drifting during cooldown.
-                # We still must reset cycle if stack breaks; handled when cooldown ends.
-                pass
 
             # -------------------------
             # POSITION LOGIC
@@ -500,9 +444,10 @@ def engine():
                 if st.bar < st.cooldown_until_bar:
                     continue
 
-                # ENTRY SIGNAL
-                sig_entry = claude_entry_signal(st.close_history, st.low_history, st.entry_state)
-                if sig_entry:
+                # ENTRY SIGNAL (BASE MODE)
+                direction = base_entry_signal(st.close_history)
+                
+                if direction == "LONG":
                     order = place_long_entry(client, symbol, capital, lot)
                     if order:
                         st.position = Position(
@@ -511,7 +456,6 @@ def engine():
                             qty=float(order["qty"]),
                             entry_bar=st.bar,
                         )
-                        on_entry_fired(st.entry_state)
 
                         cd = int(CFG["20_ENTRY_COOLDOWN_BARS"])
                         if cd > 0:
@@ -520,8 +464,12 @@ def engine():
                         log.info(f"[ENTRY] LONG qty={st.position.qty} entry={st.position.entry_price} bar={st.bar}")
                     else:
                         log.error("[ENTRY_FAIL] order failed")
-                else:
-                    pass
+                
+                elif direction == "SHORT":
+                    # v10_BASE는 LONG 전용 엔진
+                    # SHORT 시그널 무시 (또는 로그만)
+                    log.info(f"[SKIP] SHORT signal detected at bar={st.bar} (LONG-only engine)")
+                
             else:
                 # avoid same-bar entry-exit
                 if st.position.entry_bar == st.bar:
@@ -539,14 +487,12 @@ def engine():
                             st.cooldown_until_bar = st.bar + cd
                     else:
                         log.error("[EXIT_FAIL] order failed (kept position)")
-                else:
-                    pass
 
         except Exception as e:
             log.error(f"engine loop error: {e}")
             time.sleep(CFG["91_POLL_SEC"])
 
-    log.info("STOP v10 LONG")
+    log.info("STOP v10_BASE")
 
 if __name__ == "__main__":
     engine()
