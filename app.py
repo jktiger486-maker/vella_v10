@@ -1,69 +1,91 @@
 # ============================================================
-# VELLA_v10_BASE — LONG ONLY (EMA9↑EMA14 / EXIT=EMA4)
-# - EXECUTION CORE: based on v9 proven trade plumbing (lotSize/qty/order/reduceOnly/closed-bar loop)
-# - ENTRY: EMA9 crosses ABOVE EMA14 (Golden Cross)
-# - EXIT: close < EMA4 (CLOSE_LT_EMA mode default)
-# - TIME AXIS: REST closed-bar only (kline[-2])
+# VELLA_OPTIMIZER — EMA Combination Finder (v2.5 FINAL)
+# - PURPOSE: Find optimal EMA combinations for LONG/SHORT strategies
+# - TARGET: 10 LONG symbols / 10 SHORT symbols
+# - OUTPUT: Daily email report with TOP 10 rankings
+# - SCHEDULE: 07:50 backtest → 08:00 email send
+# - REVISION: 벨라 최종 지적 반영 - 완전 정합 확정
 # ============================================================
 
 import os
 import sys
 import time
-import signal
 import logging
 import requests
-from decimal import Decimal, ROUND_DOWN
-from dataclasses import dataclass, field
-from typing import Optional, Dict, Any, List
+from datetime import datetime, timedelta
+from typing import List, Dict, Tuple, Optional
+from dataclasses import dataclass
+import smtplib
+from email.mime.multipart import MIMEMultipart
+from email.mime.text import MIMEText
 
 # ============================================================
 # CFG (ALL CONTROL HERE)
 # ============================================================
-# 20250210_BASE : 완전 단순 EMA3선 교차 실험 모드
-# 20260217_LONG : EMA9↑EMA14 확정 / EXIT=EMA4 / SHORT/stack 제거
 
 CFG = {
     # -------------------------
-    # BASIC
+    # SYMBOLS
     # -------------------------
-    "01_TRADE_SYMBOL": "CCUSDT",
-    "02_INTERVAL": "5m",
-    "03_CAPITAL_BASE_USDT": 30.0,
-    "04_LEVERAGE": 1,
-
+    "100_LONG_SYMBOLS": [
+        "BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT",
+        "XRPUSDT", "AVAXUSDT", "LINKUSDT",
+        "ADAUSDT", "DOGEUSDT", "SUIUSDT"
+    ],
+    
+    "101_SHORT_SYMBOLS": [
+        "SEIUSDT", "WIFUSDT", "ARBUSDT", "OPUSDT",
+        "INJUSDT", "APTUSDT", "TIAUSDT",
+        "RNDRUSDT", "ATOMUSDT", "NEARUSDT"
+    ],
+    
     # -------------------------
-    # ENTRY (LONG ONLY)
-    # - trigger: EMA_FAST crosses ABOVE EMA_MID
+    # EMA SEARCH RANGES
     # -------------------------
-    "10_EMA_FAST": 9,
-    "11_EMA_MID": 14,
-
+    "102_FAST_RANGE": [6, 14],
+    "103_MID_RANGE": [10, 24],
+    "104_EXIT_RANGE": [3, 6],
+    
     # -------------------------
-    # ENTRY MANAGEMENT
+    # BACKTEST PERIOD
     # -------------------------
-    "20_ENTRY_COOLDOWN_BARS": 0,
-
+    "105_BACKTEST_DAYS": 7,
+    "106_FETCH_EXTRA_DAYS": 2,  # EMA 안정용 여유
+    "107_INTERVAL": "5m",
+    
     # -------------------------
-    # EXIT
+    # FEES & SLIPPAGE
     # -------------------------
-    "30_EXIT_EMA": 4,
-    "31_EXIT_MODE": "CLOSE_LT_EMA",  # "CLOSE_LT_EMA" / "CROSSUNDER"
-
+    "110_FEE_RATE": 0.0004,        # 0.04%
+    "111_SLIPPAGE_RATE": 0.00015,  # 0.015%
+    
     # -------------------------
-    # EXIT OPTIONS (plug-in slots; default OFF)
+    # SCORE FORMULA
     # -------------------------
-    "40_SL_ENABLE": False,
-    "41_SL_PCT": 2.0,
-
-    "50_TIMEOUT_EXIT_ENABLE": False,
-    "51_TIMEOUT_BARS": 60,
-
+    "113_OVERTRADE_PENALTY_PER_TRADE": 0.05,
+    "114_OVERTRADE_BASELINE_PER_DAY": 5,
+    "115_MDD_WEIGHT": 1.5,
+    
+    # -------------------------
+    # SHOCK REGIME (5m 고정)
+    # -------------------------
+    "120_SHOCK_ATR_MULTIPLIER": 2.2,
+    "121_SHOCK_VOLUME_MULTIPLIER": 2.2,
+    "122_SHOCK_4H_RANGE_PCT": 4.5,
+    
+    # -------------------------
+    # EMAIL
+    # -------------------------
+    "130_EMAIL_TO": "jktiger486@gmail.com",
+    "131_EMAIL_FROM": "vella-optimizer@noreply.com",
+    "132_SMTP_HOST": "email-smtp.us-east-1.amazonaws.com",  # AWS SES
+    "133_SMTP_PORT": 587,
+    
     # -------------------------
     # ENGINE
     # -------------------------
-    "90_KLINE_LIMIT": 1500,
-    "91_POLL_SEC": 7,
-    "92_LOG_LEVEL": "INFO",
+    "140_MAX_ENTRY_PER_TREND": 999,
+    "141_LOG_LEVEL": "ERROR",
 }
 
 # ============================================================
@@ -71,94 +93,100 @@ CFG = {
 # ============================================================
 
 logging.basicConfig(
-    level=getattr(logging, CFG["92_LOG_LEVEL"], logging.INFO),
+    level=getattr(logging, CFG["141_LOG_LEVEL"], logging.ERROR),
     format="%(asctime)s [%(levelname)s] %(message)s",
     handlers=[logging.StreamHandler(sys.stdout)],
 )
-log = logging.getLogger("VELLA_v10_BASE")
+log = logging.getLogger("VELLA_OPTIMIZER")
 
 # ============================================================
-# BINANCE (v9 style)
+# BINANCE FUTURES REST
 # ============================================================
-
-try:
-    from binance.client import Client
-    from binance.enums import SIDE_BUY, SIDE_SELL, ORDER_TYPE_MARKET
-except Exception:
-    Client = None
-    SIDE_BUY = "BUY"
-    SIDE_SELL = "SELL"
-    ORDER_TYPE_MARKET = "MARKET"
 
 BINANCE_FUTURES_KLINES = "https://fapi.binance.com/fapi/v1/klines"
+BINANCE_FUTURES_TICKER = "https://fapi.binance.com/fapi/v1/ticker/24hr"
 
-def init_client() -> "Client":
-    if Client is None:
-        raise RuntimeError("python-binance missing. pip install python-binance")
-    api_key = os.getenv("BINANCE_API_KEY")
-    api_secret = os.getenv("BINANCE_API_SECRET")
-    if not api_key or not api_secret:
-        raise RuntimeError("Missing BINANCE_API_KEY / BINANCE_API_SECRET env vars.")
-    return Client(api_key, api_secret)
 
-def set_leverage(client: "Client", symbol: str, leverage: int) -> None:
+# ============================================================
+# FIX BLOCK — "완료봉 진짜 동일" 보장 (Binance kline closeTime 기반)
+# - 목적: REST 응답에서 마지막 봉이 진행중/완료봉 혼재하는 케이스를 0%로 만들기
+# - 방식: klines[*][6] (closeTime ms) <= now_ms 인 봉만 "완료봉"으로 인정
+# - 결과: backtest 루프는 "마지막 완료봉 index"까지만 돈다 (진행중 봉 절대 사용 X)
+# ============================================================
+
+# 1) HELPER 추가 (상단 BINANCE REST 섹션 아래 아무데나)
+def last_closed_index_from_klines(klines: List) -> int:
+    """
+    Binance kline의 closeTime(ms) 기준으로 '마지막 완료봉' index를 반환.
+    - return: 마지막 완료봉 index (없으면 -1)
+    """
+    now_ms = int(time.time() * 1000)
+    last_idx = -1
+    for i, k in enumerate(klines):
+        # kline format: [openTime, open, high, low, close, volume, closeTime, ...]
+        close_time_ms = int(k[6])
+        if close_time_ms <= now_ms:
+            last_idx = i
+        else:
+            break
+    return last_idx
+
+
+def get_bars_per_day(interval: str) -> int:
+    """interval 기준 하루 봉 수 계산"""
+    mapping = {
+        "1m": 1440,
+        "3m": 480,
+        "5m": 288,
+        "15m": 96,
+        "30m": 48,
+        "1h": 24,
+        "2h": 12,
+        "4h": 6,
+        "6h": 4,
+        "12h": 2,
+        "1d": 1
+    }
+    return mapping.get(interval, 288)
+
+def fetch_klines(symbol: str, interval: str, days: int) -> Optional[List]:
+    """Binance Futures klines 조회"""
     try:
-        client.futures_change_leverage(symbol=symbol, leverage=leverage)
-    except Exception as e:
-        log.error(f"set_leverage failed: {e}")
-
-def fetch_klines_futures(symbol: str, interval: str, limit: int) -> Optional[List[Any]]:
-    try:
+        bars_per_day = get_bars_per_day(interval)
+        limit = days * bars_per_day + 100  # 여유분
         r = requests.get(
             BINANCE_FUTURES_KLINES,
             params={"symbol": symbol, "interval": interval, "limit": limit},
-            timeout=5,
+            timeout=10
         )
         r.raise_for_status()
         return r.json()
     except Exception as e:
-        log.error(f"fetch_klines_futures: {e}")
+        log.error(f"fetch_klines {symbol}: {e}")
         return None
 
-def get_futures_lot_size(client: "Client", symbol: str) -> Optional[Dict[str, Decimal]]:
+def fetch_24h_ticker(symbol: str) -> Optional[Dict]:
+    """24h ticker 조회"""
     try:
-        info = client.futures_exchange_info()
-        for s in info["symbols"]:
-            if s["symbol"] == symbol:
-                for f in s["filters"]:
-                    if f["filterType"] == "LOT_SIZE":
-                        return {
-                            "stepSize": Decimal(f["stepSize"]),
-                            "minQty": Decimal(f["minQty"]),
-                            "maxQty": Decimal(f["maxQty"]),
-                        }
-        return None
+        r = requests.get(
+            BINANCE_FUTURES_TICKER,
+            params={"symbol": symbol},
+            timeout=5
+        )
+        r.raise_for_status()
+        return r.json()
     except Exception as e:
-        log.error(f"get_futures_lot_size: {e}")
+        log.error(f"fetch_24h_ticker {symbol}: {e}")
         return None
-
-def calculate_quantity(qty_raw: float, lot: Dict[str, Decimal]) -> Optional[float]:
-    if lot is None:
-        return None
-    qty_decimal = Decimal(str(qty_raw))
-    step = lot["stepSize"]
-    qty = (qty_decimal / step).quantize(Decimal("1"), rounding=ROUND_DOWN) * step
-    if qty < lot["minQty"]:
-        return None
-    if qty > lot["maxQty"]:
-        qty = lot["maxQty"]
-    precision = abs(step.as_tuple().exponent)
-    return float(qty.quantize(Decimal(10) ** -precision))
 
 # ============================================================
 # INDICATORS
 # ============================================================
 
 def ema_series(values: List[float], period: int) -> List[float]:
-    if not values:
-        return []
-    if len(values) < period:
-        return [values[0]] * len(values)
+    """EMA 계산"""
+    if not values or len(values) < period:
+        return [values[0]] * len(values) if values else []
     k = 2 / (period + 1)
     out = [values[0]] * len(values)
     sma = sum(values[:period]) / period
@@ -171,237 +199,558 @@ def ema_series(values: List[float], period: int) -> List[float]:
         out[i] = out[period - 1]
     return out
 
+def atr(highs: List[float], lows: List[float], closes: List[float], period: int) -> float:
+    """ATR 계산"""
+    if len(highs) < period + 1:
+        return 0.0
+    tr_list = []
+    for i in range(1, period + 1):
+        h = highs[-i]
+        l = lows[-i]
+        c_prev = closes[-(i+1)]
+        tr = max(h - l, abs(h - c_prev), abs(l - c_prev))
+        tr_list.append(tr)
+    return sum(tr_list) / len(tr_list)
+
 # ============================================================
 # STATE
 # ============================================================
 
 @dataclass
-class Position:
-    side: str
-    entry_price: float
-    qty: float
+class Trade:
     entry_bar: int
+    entry_price: float
+    exit_bar: int
+    exit_price: float
+    pnl_pct: float
 
 @dataclass
-class EngineState:
-    bar: int = 0
-    last_open_time: Optional[int] = None
-    cooldown_until_bar: int = 0
-    position: Optional[Position] = None
-    close_history: List[float] = field(default_factory=list)
+class BacktestResult:
+    symbol: str
+    fast: int
+    mid: int
+    exit_ema: int
+    net_return: float
+    mdd: float
+    total_trades: int
+    trades_per_day: float
+    win_rate: float
+    recent_2d_price_change: float  # 종목 가격 변동률 (전략 수익 아님)
+    score: float
+    trades: List[Trade]
 
 # ============================================================
-# ENTRY (LONG ONLY — EMA9 crosses ABOVE EMA14)
+# BACKTEST ENGINE
 # ============================================================
 
-def base_entry_signal(closes: List[float]) -> Optional[str]:
-    if len(closes) < 60:
+def backtest_short(
+    closes: List[float],
+    fast: int,
+    mid: int,
+    exit_ema: int,
+    days: int
+) -> Tuple[List[Trade], float, float]:
+    """
+    SHORT 백테스트 (v9 완료봉 기준 완전 정합)
+    ENTRY 1: ema_fast ↓ ema_mid
+    ENTRY 2: ema_fast < ema_mid AND close[-2] > ema_fast[-2] AND close[-1] < ema_fast[-1]
+    EXIT: close > ema_exit
+    """
+    ema_fast_s = ema_series(closes, fast)
+    ema_mid_s = ema_series(closes, mid)
+    ema_exit_s = ema_series(closes, exit_ema)
+    
+    trades = []
+    position = None
+    entry_count = 0
+    max_entry = CFG["140_MAX_ENTRY_PER_TREND"]
+    
+    equity = 1.0
+    peak = 1.0
+    max_dd = 0.0
+    
+    fee_per_trade = CFG["110_FEE_RATE"] + CFG["111_SLIPPAGE_RATE"]
+    
+    # 완료봉 기준 루프 - 마지막 봉 제외 (진행 중 봉)
+    for bar in range(60, len(closes) - 1):
+        close_now = closes[bar]
+        
+        # EXIT 우선
+        if position is not None:
+            if bar == position['entry_bar']:
+                continue
+            
+            if close_now > ema_exit_s[bar]:
+                # EXIT
+                exit_price = close_now
+                pnl_pct = (position['entry_price'] - exit_price) / position['entry_price']
+                
+                # 수수료 복리 반영
+                pnl_pct_net = pnl_pct - (fee_per_trade * 2)  # 왕복
+                
+                trades.append(Trade(
+                    entry_bar=position['entry_bar'],
+                    entry_price=position['entry_price'],
+                    exit_bar=bar,
+                    exit_price=exit_price,
+                    pnl_pct=pnl_pct_net
+                ))
+                
+                equity *= (1 + pnl_pct_net)
+                peak = max(peak, equity)
+                dd = (peak - equity) / peak
+                max_dd = max(max_dd, dd)
+                
+                position = None
+                entry_count = 0
+        
+        # ENTRY
+        if position is None:
+            if entry_count >= max_entry:
+                continue
+            
+            # E1: Dead Cross (완료봉 기준)
+            e1_signal = False
+            if bar >= 1:
+                e1_signal = (
+                    ema_fast_s[bar-1] >= ema_mid_s[bar-1] and
+                    ema_fast_s[bar] < ema_mid_s[bar]
+                )
+            
+            # E2: Re-Acceleration
+            e2_signal = False
+            if not e1_signal:
+                if ema_fast_s[bar] < ema_mid_s[bar]:
+                    if bar >= 1:
+                        pullback = closes[bar-1] > ema_fast_s[bar-1]
+                        reentry = closes[bar] < ema_fast_s[bar]
+                        e2_signal = pullback and reentry
+            
+            if e1_signal or e2_signal:
+                position = {
+                    'entry_bar': bar,
+                    'entry_price': close_now
+                }
+                entry_count += 1
+    
+    # 루프 종료 시 미청산 포지션 강제 청산 (마지막 완료봉 기준)
+    if position is not None:
+        exit_price = closes[-2]
+        pnl_pct = (position['entry_price'] - exit_price) / position['entry_price']
+        pnl_pct_net = pnl_pct - (fee_per_trade * 2)
+        
+        trades.append(Trade(
+            entry_bar=position['entry_bar'],
+            entry_price=position['entry_price'],
+            exit_bar=len(closes) - 2,
+            exit_price=exit_price,
+            pnl_pct=pnl_pct_net
+        ))
+        
+        equity *= (1 + pnl_pct_net)
+        peak = max(peak, equity)
+        dd = (peak - equity) / peak
+        max_dd = max(max_dd, dd)
+    
+    return trades, max_dd, equity - 1.0
+
+def backtest_long(
+    closes: List[float],
+    fast: int,
+    mid: int,
+    exit_ema: int,
+    days: int
+) -> Tuple[List[Trade], float, float]:
+    """
+    LONG 백테스트 (v10 완료봉 기준 완전 정합)
+    ENTRY 1: ema_fast ↑ ema_mid
+    ENTRY 2: ema_fast > ema_mid AND close[-2] < ema_fast[-2] AND close[-1] > ema_fast[-1]
+    EXIT: close < ema_exit
+    """
+    ema_fast_s = ema_series(closes, fast)
+    ema_mid_s = ema_series(closes, mid)
+    ema_exit_s = ema_series(closes, exit_ema)
+    
+    trades = []
+    position = None
+    entry_count = 0
+    max_entry = CFG["140_MAX_ENTRY_PER_TREND"]
+    
+    equity = 1.0
+    peak = 1.0
+    max_dd = 0.0
+    
+    fee_per_trade = CFG["110_FEE_RATE"] + CFG["111_SLIPPAGE_RATE"]
+    
+    # 완료봉 기준 루프 - 마지막 봉 제외 (진행 중 봉)
+    for bar in range(60, len(closes) - 1):
+        close_now = closes[bar]
+        
+        # EXIT 우선
+        if position is not None:
+            if bar == position['entry_bar']:
+                continue
+            
+            if close_now < ema_exit_s[bar]:
+                # EXIT
+                exit_price = close_now
+                pnl_pct = (exit_price - position['entry_price']) / position['entry_price']
+                
+                # 수수료 복리 반영
+                pnl_pct_net = pnl_pct - (fee_per_trade * 2)  # 왕복
+                
+                trades.append(Trade(
+                    entry_bar=position['entry_bar'],
+                    entry_price=position['entry_price'],
+                    exit_bar=bar,
+                    exit_price=exit_price,
+                    pnl_pct=pnl_pct_net
+                ))
+                
+                equity *= (1 + pnl_pct_net)
+                peak = max(peak, equity)
+                dd = (peak - equity) / peak
+                max_dd = max(max_dd, dd)
+                
+                position = None
+                entry_count = 0
+        
+        # ENTRY
+        if position is None:
+            if entry_count >= max_entry:
+                continue
+            
+            # E1: Golden Cross (완료봉 기준)
+            e1_signal = False
+            if bar >= 1:
+                e1_signal = (
+                    ema_fast_s[bar-1] <= ema_mid_s[bar-1] and
+                    ema_fast_s[bar] > ema_mid_s[bar]
+                )
+            
+            # E2: Re-Acceleration
+            e2_signal = False
+            if not e1_signal:
+                if ema_fast_s[bar] > ema_mid_s[bar]:
+                    if bar >= 1:
+                        pullback = closes[bar-1] < ema_fast_s[bar-1]
+                        reentry = closes[bar] > ema_fast_s[bar]
+                        e2_signal = pullback and reentry
+            
+            if e1_signal or e2_signal:
+                position = {
+                    'entry_bar': bar,
+                    'entry_price': close_now
+                }
+                entry_count += 1
+    
+    # 루프 종료 시 미청산 포지션 강제 청산 (마지막 완료봉 기준)
+    if position is not None:
+        exit_price = closes[-2]
+        pnl_pct = (exit_price - position['entry_price']) / position['entry_price']
+        pnl_pct_net = pnl_pct - (fee_per_trade * 2)
+        
+        trades.append(Trade(
+            entry_bar=position['entry_bar'],
+            entry_price=position['entry_price'],
+            exit_bar=len(closes) - 2,
+            exit_price=exit_price,
+            pnl_pct=pnl_pct_net
+        ))
+        
+        equity *= (1 + pnl_pct_net)
+        peak = max(peak, equity)
+        dd = (peak - equity) / peak
+        max_dd = max(max_dd, dd)
+    
+    return trades, max_dd, equity - 1.0
+
+def calculate_recent_2d_price_change(closes: List[float], interval: str) -> float:
+    """최근 2일 종목 가격 변동률 (전략 수익 아님)"""
+    bars_per_day = get_bars_per_day(interval)
+    bars_2d = bars_per_day * 2
+    
+    if len(closes) < bars_2d:
+        return 0.0
+    start = closes[-bars_2d]
+    end = closes[-1]
+    return (end - start) / start * 100
+
+def calculate_score(
+    net_return: float,
+    mdd: float,
+    trades_per_day: float
+) -> float:
+    """점수 계산"""
+    overtrade_penalty = max(0, trades_per_day - CFG["114_OVERTRADE_BASELINE_PER_DAY"]) * CFG["113_OVERTRADE_PENALTY_PER_TRADE"]
+    score = net_return - (abs(mdd) * CFG["115_MDD_WEIGHT"]) - overtrade_penalty
+    return score
+
+
+# --- 교체 ---
+def optimize_symbol(symbol: str, direction: str, klines: List) -> Optional[BacktestResult]:
+    interval = CFG["107_INTERVAL"]
+    backtest_days = CFG["105_BACKTEST_DAYS"]
+    bars_per_day = get_bars_per_day(interval)
+    backtest_bars = backtest_days * bars_per_day
+
+    # ✅ 완료봉 index 확정
+    last_closed_idx = last_closed_index_from_klines(klines)
+    if last_closed_idx < 0:
+        log.error(f"{symbol}: no closed bars")
         return None
 
-    ema_fast_s = ema_series(closes, CFG["10_EMA_FAST"])
-    ema_mid_s  = ema_series(closes, CFG["11_EMA_MID"])
+    # ✅ 완료봉까지만 잘라서 사용 (진행중 봉 배제)
+    klines_closed = klines[: last_closed_idx + 1]
+    closes = [float(k[4]) for k in klines_closed]
 
-    cross_up = (
-        (ema_fast_s[-2] <= ema_mid_s[-2]) and
-        (ema_fast_s[-1] > ema_mid_s[-1])
+    if len(closes) < backtest_bars + 100:
+        log.error(f"{symbol}: insufficient closed data")
+        return None
+
+    closes_trimmed = closes[-backtest_bars:]
+
+    
+    best_result = None
+    best_score = -999999
+    
+    fast_range = range(CFG["102_FAST_RANGE"][0], CFG["102_FAST_RANGE"][1] + 1)
+    mid_range = range(CFG["103_MID_RANGE"][0], CFG["103_MID_RANGE"][1] + 1)
+    exit_range = range(CFG["104_EXIT_RANGE"][0], CFG["104_EXIT_RANGE"][1] + 1)
+    
+    for fast in fast_range:
+        for mid in mid_range:
+            if mid <= fast:
+                continue
+            if mid - fast < 3:
+                continue
+            
+            for exit_ema in exit_range:
+                if direction == "SHORT":
+                    trades, mdd, net_return_ratio = backtest_short(closes_trimmed, fast, mid, exit_ema, backtest_days)
+                else:
+                    trades, mdd, net_return_ratio = backtest_long(closes_trimmed, fast, mid, exit_ema, backtest_days)
+                
+                if not trades:
+                    continue
+                
+                # 백테스트에서 이미 수수료 복리 반영됨
+                net_return_pct = net_return_ratio * 100
+                
+                trades_per_day = len(trades) / backtest_days
+                
+                wins = sum(1 for t in trades if t.pnl_pct > 0)
+                win_rate = (wins / len(trades)) * 100 if trades else 0
+                
+                recent_2d = calculate_recent_2d_price_change(closes_trimmed, interval)
+
+                
+                score = calculate_score(net_return_pct, mdd * 100, trades_per_day)
+                
+                if score > best_score:
+                    best_score = score
+                    best_result = BacktestResult(
+                        symbol=symbol,
+                        fast=fast,
+                        mid=mid,
+                        exit_ema=exit_ema,
+                        net_return=net_return_pct,
+                        mdd=mdd * 100,
+                        total_trades=len(trades),
+                        trades_per_day=trades_per_day,
+                        win_rate=win_rate,
+                        recent_2d_price_change=recent_2d,
+                        score=score,
+                        trades=trades
+                    )
+    
+    return best_result
+
+# ============================================================
+# SHOCK REGIME (5m 고정)
+# ============================================================
+
+def check_shock() -> bool:
+    """SHOCK 판정 (5m 고정, BTC 4H 변동폭 OR ATR+Volume)"""
+    try:
+        # 조건 A: BTC 4H 변동폭
+        klines_4h = fetch_klines("BTCUSDT", "4h", 1)
+        if klines_4h and len(klines_4h) >= 1:
+            k = klines_4h[-1]
+            high = float(k[2])
+            low = float(k[3])
+            range_pct = (high - low) / low * 100
+            if range_pct >= CFG["122_SHOCK_4H_RANGE_PCT"]:
+                return True
+        
+        # 조건 B+C: 5m ATR 폭증 AND 거래대금 급증 (5m 고정)
+        klines_5m = fetch_klines("BTCUSDT", "5m", 8)
+        if klines_5m and len(klines_5m) > 288 * 7:
+            closes = [float(k[4]) for k in klines_5m]
+            highs = [float(k[2]) for k in klines_5m]
+            lows = [float(k[3]) for k in klines_5m]
+            
+            # ATR 현재 vs 7일 평균 (5m 고정)
+            atr_now = atr(highs, lows, closes, 14)
+            atr_7d_list = []
+            for i in range(0, 288*7, 288):  # 5m = 288 per day
+                if i + 288 <= len(highs):
+                    atr_7d_list.append(atr(highs[i:i+288], lows[i:i+288], closes[i:i+288], 14))
+            
+            if len(atr_7d_list) > 0:
+                atr_7d_avg = sum(atr_7d_list) / len(atr_7d_list)
+                
+                if atr_7d_avg > 0 and atr_now >= atr_7d_avg * CFG["120_SHOCK_ATR_MULTIPLIER"]:
+                    # 거래대금 체크
+                    klines_1h = fetch_klines("BTCUSDT", "1h", 8)
+                    if klines_1h and len(klines_1h) > 24 * 7:
+                        volumes_1h = [float(k[5]) for k in klines_1h]
+                        vol_now = volumes_1h[-1]
+                        vol_7d_avg = sum(volumes_1h[-24*7:]) / (24 * 7)
+                        
+                        if vol_now >= vol_7d_avg * CFG["121_SHOCK_VOLUME_MULTIPLIER"]:
+                            return True
+        
+        return False
+    except Exception as e:
+        log.error(f"check_shock: {e}")
+        return False
+
+# ============================================================
+# EMAIL GENERATION
+# ============================================================
+
+def format_table_row(rank: int, result: BacktestResult) -> str:
+    """테이블 행 생성"""
+    wr_flag = ""
+    if result.win_rate < 35:
+        wr_flag = "⚠"
+    elif result.win_rate > 55:
+        wr_flag = "★"
+    
+    return (
+        f"{rank} | {result.symbol} | {result.fast} | {result.mid} | {result.exit_ema} | "
+        f"{result.net_return:.2f}% | {result.mdd:.2f}% | {result.recent_2d_price_change:.2f}% | "
+        f"{result.win_rate:.1f}%{wr_flag} | {result.total_trades} | {result.score:.2f}"
     )
 
-    if cross_up:
-        return "LONG"
+def generate_email_body(long_results: List[BacktestResult], short_results: List[BacktestResult], shock: bool) -> str:
+    """이메일 본문 생성"""
+    body = []
+    
+    # 상단 경고
+    body.append("⚠ 본 리포트는 일봉 마감(09:00 KST) 전 데이터 기준입니다.\n")
+    
+    if shock:
+        body.append("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+        body.append("⚠ 현재 시장은 SHOCK 상태입니다.")
+        body.append("변동성 급증 구간으로 포지션 강도 축소 권고.")
+        body.append("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n")
+    
+    # LONG TOP 10
+    body.append("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+    body.append("[LONG TOP 10]")
+    body.append("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+    body.append("순위 | 종목 | FAST | MID | EXIT | 7일Net | 7일MDD | 2일가격변동 | 승률 | 트레이드 | 점수")
+    body.append("─────────────────────────────────────")
+    
+    for i, result in enumerate(long_results[:10], 1):
+        body.append(format_table_row(i, result))
+    
+    body.append("")
+    
+    # SHORT TOP 10
+    body.append("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+    body.append("[SHORT TOP 10]")
+    body.append("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+    body.append("순위 | 종목 | FAST | MID | EXIT | 7일Net | 7일MDD | 2일가격변동 | 승률 | 트레이드 | 점수")
+    body.append("─────────────────────────────────────")
+    
+    for i, result in enumerate(short_results[:10], 1):
+        body.append(format_table_row(i, result))
+    
+    body.append("")
+    body.append("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+    body.append("VELLA_v9_OPTIMIZER v2.5")
+    body.append(f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    body.append("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+    
+    return "\n".join(body)
 
-    return None
-
-# ============================================================
-# EXIT (EMA4 based + SL + TIMEOUT)
-# ============================================================
-
-def exit_option_sl(close: float, entry_price: float, side: str) -> bool:
-    if not CFG["40_SL_ENABLE"]:
-        return False
-    sl = float(CFG["41_SL_PCT"]) / 100.0
-    if side == "LONG":
-        return close <= entry_price * (1.0 - sl)
-    else:
-        return close >= entry_price * (1.0 + sl)
-
-def exit_option_timeout(current_bar: int, entry_bar: int) -> bool:
-    if not CFG["50_TIMEOUT_EXIT_ENABLE"]:
-        return False
-    return (current_bar - entry_bar) >= int(CFG["51_TIMEOUT_BARS"])
-
-def exit_signal(state: EngineState) -> bool:
-    pos = state.position
-    if pos is None:
-        return False
-
-    close_now = state.close_history[-1]
-
-    if exit_option_sl(close_now, pos.entry_price, pos.side):
-        return True
-    if exit_option_timeout(state.bar, pos.entry_bar):
-        return True
-
-    ema_exit_s   = ema_series(state.close_history, int(CFG["30_EXIT_EMA"]))
-    ema_exit_now = ema_exit_s[-1]
-    mode         = CFG["31_EXIT_MODE"]
-
-    if mode == "CLOSE_LT_EMA":
-        if close_now < ema_exit_now:
-            return True
-
-    elif mode == "CROSSUNDER":
-        close_prev    = state.close_history[-2]
-        ema_exit_prev = ema_exit_s[-2]
-        crossunder = (close_prev >= ema_exit_prev) and (close_now < ema_exit_now)
-        if crossunder:
-            return True
-
-    return False
-
-# ============================================================
-# EXECUTION (v9-style order plumbing)
-# ============================================================
-
-def place_long_entry(client: "Client", symbol: str, capital_usdt: float, lot: Dict[str, Decimal]) -> Optional[Dict[str, Any]]:
+def send_email(subject: str, body: str):
+    """AWS SES 이메일 발송"""
     try:
-        ticker = client.futures_symbol_ticker(symbol=symbol)
-        price = float(ticker["price"])
-        leverage = int(CFG["04_LEVERAGE"])
-        notional = float(capital_usdt) * float(leverage)
-        qty_raw = notional / price
-        qty = calculate_quantity(qty_raw, lot)
-        if qty is None:
-            log.error("entry: qty calculation failed (minQty/stepSize)")
-            return None
-        client.futures_create_order(
-            symbol=symbol,
-            side=SIDE_BUY,
-            type=ORDER_TYPE_MARKET,
-            quantity=qty,
-        )
-        return {"entry_price": price, "qty": qty}
+        smtp_user = os.getenv("AWS_SES_SMTP_USER")
+        smtp_pass = os.getenv("AWS_SES_SMTP_PASS")
+        
+        if not smtp_user or not smtp_pass:
+            log.error("AWS SES credentials not found in environment")
+            return
+        
+        msg = MIMEMultipart()
+        msg['From'] = CFG["131_EMAIL_FROM"]
+        msg['To'] = CFG["130_EMAIL_TO"]
+        msg['Subject'] = subject
+        
+        msg.attach(MIMEText(body, 'plain', 'utf-8'))
+        
+        server = smtplib.SMTP(CFG["132_SMTP_HOST"], CFG["133_SMTP_PORT"])
+        server.starttls()
+        server.login(smtp_user, smtp_pass)
+        server.send_message(msg)
+        server.quit()
+        
+        log.info("Email sent successfully")
     except Exception as e:
-        log.error(f"place_long_entry: {e}")
-        return None
-
-def place_long_exit(client: "Client", symbol: str, qty: float, lot: Dict[str, Decimal]) -> bool:
-    try:
-        qty_rounded = calculate_quantity(qty, lot)
-        if qty_rounded is None:
-            log.error("exit: qty too small (minQty) — cannot close")
-            return False
-        client.futures_create_order(
-            symbol=symbol,
-            side=SIDE_SELL,
-            type=ORDER_TYPE_MARKET,
-            quantity=qty_rounded,
-            reduceOnly=True
-        )
-        return True
-    except Exception as e:
-        log.error(f"place_long_exit: {e}")
-        return False
+        log.error(f"send_email: {e}")
 
 # ============================================================
-# ENGINE LOOP (closed bar only)
+# MAIN
 # ============================================================
 
-STOP = False
-def _sig_handler(_sig, _frame):
-    global STOP
-    STOP = True
-signal.signal(signal.SIGINT, _sig_handler)
-signal.signal(signal.SIGTERM, _sig_handler)
-
-def engine():
-    client = init_client()
-    symbol = CFG["01_TRADE_SYMBOL"]
-    interval = CFG["02_INTERVAL"]
-    capital = float(CFG["03_CAPITAL_BASE_USDT"])
-
-    set_leverage(client, symbol, int(CFG["04_LEVERAGE"]))
-
-    lot = get_futures_lot_size(client, symbol)
-    if lot is None:
-        raise RuntimeError("lot_size retrieval failed")
-
-    st = EngineState()
-
-    log.info(f"START v10_BASE (EMA9↑EMA14 / EXIT=EMA4) | symbol={symbol} interval={interval} capital={capital} lev={CFG['04_LEVERAGE']}")
-
-    while not STOP:
-        try:
-            kl = fetch_klines_futures(symbol, interval, int(CFG["90_KLINE_LIMIT"]))
-            if not kl:
-                time.sleep(CFG["91_POLL_SEC"])
-                continue
-
-            completed = kl[-2]
-            open_time = int(completed[0])
-
-            if st.last_open_time == open_time:
-                time.sleep(CFG["91_POLL_SEC"])
-                continue
-
-            if not st.close_history:
-                for k in kl[:-1]:
-                    st.close_history.append(float(k[4]))
-                st.bar = len(st.close_history)
-                st.last_open_time = int(kl[-2][0])
-                log.info(f"COLD START: loaded {st.bar} bars")
-                continue
-
-            st.last_open_time = open_time
-            st.bar += 1
-
-            close = float(completed[4])
-            st.close_history.append(close)
-
-            if len(st.close_history) > 2000:
-                st.close_history = st.close_history[-2000:]
-
-            if st.position is None:
-                if st.bar < st.cooldown_until_bar:
-                    continue
-
-                direction = base_entry_signal(st.close_history)
-
-                if direction == "LONG":
-                    order = place_long_entry(client, symbol, capital, lot)
-                    if order:
-                        st.position = Position(
-                            side="LONG",
-                            entry_price=float(order["entry_price"]),
-                            qty=float(order["qty"]),
-                            entry_bar=st.bar,
-                        )
-                        cd = int(CFG["20_ENTRY_COOLDOWN_BARS"])
-                        if cd > 0:
-                            st.cooldown_until_bar = st.bar + cd
-                        log.info(f"[ENTRY] LONG qty={st.position.qty} entry={st.position.entry_price} bar={st.bar}")
-                    else:
-                        log.error("[ENTRY_FAIL] order failed")
-
-            else:
-                if st.position.entry_bar == st.bar:
-                    continue
-
-                if exit_signal(st):
-                    ok = place_long_exit(client, symbol, st.position.qty, lot)
-                    if ok:
-                        log.info(f"[EXIT] LONG close={close} entry={st.position.entry_price} bar={st.bar}")
-                        st.position = None
-                        cd = int(CFG["20_ENTRY_COOLDOWN_BARS"])
-                        if cd > 0:
-                            st.cooldown_until_bar = st.bar + cd
-                    else:
-                        log.error("[EXIT_FAIL] order failed (kept position)")
-
-        except Exception as e:
-            log.error(f"engine loop error: {e}")
-            time.sleep(CFG["91_POLL_SEC"])
-
-    log.info("STOP v10_BASE")
+def main():
+    log.info("VELLA_v9_OPTIMIZER START")
+    
+    # 데이터 조회
+    total_days = CFG["105_BACKTEST_DAYS"] + CFG["106_FETCH_EXTRA_DAYS"]
+    interval = CFG["107_INTERVAL"]
+    
+    long_results = []
+    short_results = []
+    
+    # LONG 종목 최적화
+    for symbol in CFG["100_LONG_SYMBOLS"]:
+        log.info(f"Optimizing LONG: {symbol}")
+        klines = fetch_klines(symbol, interval, total_days)
+        if klines:
+            result = optimize_symbol(symbol, "LONG", klines)
+            if result:
+                long_results.append(result)
+    
+    # SHORT 종목 최적화
+    for symbol in CFG["101_SHORT_SYMBOLS"]:
+        log.info(f"Optimizing SHORT: {symbol}")
+        klines = fetch_klines(symbol, interval, total_days)
+        if klines:
+            result = optimize_symbol(symbol, "SHORT", klines)
+            if result:
+                short_results.append(result)
+    
+    # 정렬
+    long_results.sort(key=lambda x: x.score, reverse=True)
+    short_results.sort(key=lambda x: x.score, reverse=True)
+    
+    # SHOCK 판정
+    shock = check_shock()
+    
+    # 이메일 생성
+    subject = f"VELLA OPTIMIZER Report - {datetime.now().strftime('%Y-%m-%d')}"
+    body = generate_email_body(long_results, short_results, shock)
+    
+    # 이메일 발송
+    send_email(subject, body)
+    
+    log.info("VELLA_v9_OPTIMIZER DONE")
 
 if __name__ == "__main__":
-    engine()
+    main()
