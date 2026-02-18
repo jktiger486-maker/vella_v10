@@ -1,5 +1,5 @@
 # ============================================================
-# VELLA_OPTIMIZER — EMA Combination Finder (v2.5 FINAL)
+# VELLA_v9_OPTIMIZER — EMA Combination Finder (v2.5 FINAL)
 # - PURPOSE: Find optimal EMA combinations for LONG/SHORT strategies
 # - TARGET: 10 LONG symbols / 10 SHORT symbols
 # - OUTPUT: Daily email report with TOP 10 rankings
@@ -49,8 +49,8 @@ CFG = {
     # -------------------------
     # BACKTEST PERIOD
     # -------------------------
-    "105_BACKTEST_DAYS": 7,
-    "106_FETCH_EXTRA_DAYS": 2,  # EMA 안정용 여유
+    "105_BACKTEST_DAYS": 4,
+    "106_FETCH_EXTRA_DAYS": 1,  # EMA 안정용 여유
     "107_INTERVAL": "5m",
     
     # -------------------------
@@ -106,32 +106,6 @@ log = logging.getLogger("VELLA_OPTIMIZER")
 BINANCE_FUTURES_KLINES = "https://fapi.binance.com/fapi/v1/klines"
 BINANCE_FUTURES_TICKER = "https://fapi.binance.com/fapi/v1/ticker/24hr"
 
-
-# ============================================================
-# FIX BLOCK — "완료봉 진짜 동일" 보장 (Binance kline closeTime 기반)
-# - 목적: REST 응답에서 마지막 봉이 진행중/완료봉 혼재하는 케이스를 0%로 만들기
-# - 방식: klines[*][6] (closeTime ms) <= now_ms 인 봉만 "완료봉"으로 인정
-# - 결과: backtest 루프는 "마지막 완료봉 index"까지만 돈다 (진행중 봉 절대 사용 X)
-# ============================================================
-
-# 1) HELPER 추가 (상단 BINANCE REST 섹션 아래 아무데나)
-def last_closed_index_from_klines(klines: List) -> int:
-    """
-    Binance kline의 closeTime(ms) 기준으로 '마지막 완료봉' index를 반환.
-    - return: 마지막 완료봉 index (없으면 -1)
-    """
-    now_ms = int(time.time() * 1000)
-    last_idx = -1
-    for i, k in enumerate(klines):
-        # kline format: [openTime, open, high, low, close, volume, closeTime, ...]
-        close_time_ms = int(k[6])
-        if close_time_ms <= now_ms:
-            last_idx = i
-        else:
-            break
-    return last_idx
-
-
 def get_bars_per_day(interval: str) -> int:
     """interval 기준 하루 봉 수 계산"""
     mapping = {
@@ -154,6 +128,7 @@ def fetch_klines(symbol: str, interval: str, days: int) -> Optional[List]:
     try:
         bars_per_day = get_bars_per_day(interval)
         limit = days * bars_per_day + 100  # 여유분
+        limit = min(limit, 1500)  # Binance Futures 최대 1500
         r = requests.get(
             BINANCE_FUTURES_KLINES,
             params={"symbol": symbol, "interval": interval, "limit": limit},
@@ -486,30 +461,21 @@ def calculate_score(
     score = net_return - (abs(mdd) * CFG["115_MDD_WEIGHT"]) - overtrade_penalty
     return score
 
-
-# --- 교체 ---
 def optimize_symbol(symbol: str, direction: str, klines: List) -> Optional[BacktestResult]:
+    """단일 종목 최적 EMA 조합 탐색"""
+    closes = [float(k[4]) for k in klines]
+    
     interval = CFG["107_INTERVAL"]
     backtest_days = CFG["105_BACKTEST_DAYS"]
     bars_per_day = get_bars_per_day(interval)
     backtest_bars = backtest_days * bars_per_day
-
-    # ✅ 완료봉 index 확정
-    last_closed_idx = last_closed_index_from_klines(klines)
-    if last_closed_idx < 0:
-        log.error(f"{symbol}: no closed bars")
-        return None
-
-    # ✅ 완료봉까지만 잘라서 사용 (진행중 봉 배제)
-    klines_closed = klines[: last_closed_idx + 1]
-    closes = [float(k[4]) for k in klines_closed]
-
+    
     if len(closes) < backtest_bars + 100:
-        log.error(f"{symbol}: insufficient closed data")
+        log.error(f"{symbol}: insufficient data")
         return None
-
+    
+    # 최근 N일만 사용
     closes_trimmed = closes[-backtest_bars:]
-
     
     best_result = None
     best_score = -999999
@@ -542,8 +508,7 @@ def optimize_symbol(symbol: str, direction: str, klines: List) -> Optional[Backt
                 wins = sum(1 for t in trades if t.pnl_pct > 0)
                 win_rate = (wins / len(trades)) * 100 if trades else 0
                 
-                recent_2d = calculate_recent_2d_price_change(closes_trimmed, interval)
-
+                recent_2d = calculate_recent_2d_price_change(closes, interval)
                 
                 score = calculate_score(net_return_pct, mdd * 100, trades_per_day)
                 
