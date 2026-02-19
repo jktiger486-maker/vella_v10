@@ -1,10 +1,10 @@
 # ============================================================
-# VELLA_v9_OPTIMIZER — EMA Combination Finder (v2.5 FINAL)
+# VELLA_v9_OPTIMIZER — EMA Combination Finder (v2.6 DAEMON)
 # - PURPOSE: Find optimal EMA combinations for LONG/SHORT strategies
 # - TARGET: 10 LONG symbols / 10 SHORT symbols
 # - OUTPUT: Daily email report with TOP 10 rankings
-# - SCHEDULE: 07:50 backtest → 08:00 email send
-# - REVISION: 벨라 최종 지적 반영 - 완전 정합 확정
+# - SCHEDULE: KST 08:00 daily (daemon mode)
+# - REVISION: systemd daemon + KST schedule gate
 # ============================================================
 
 import os
@@ -12,7 +12,7 @@ import sys
 import time
 import logging
 import requests
-from datetime import datetime, timedelta
+from datetime import datetime, timezone, timedelta
 from typing import List, Dict, Tuple, Optional
 from dataclasses import dataclass
 import smtplib
@@ -636,8 +636,8 @@ def generate_email_body(long_results: List[BacktestResult], short_results: List[
     
     body.append("")
     body.append("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
-    body.append("VELLA_v9_OPTIMIZER v2.5")
-    body.append(f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    body.append("VELLA_v9_OPTIMIZER v2.6")
+    body.append(f"Generated: {datetime.now(timezone(timedelta(hours=9))).strftime('%Y-%m-%d %H:%M:%S')}")
     body.append("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
     
     return "\n".join(body)
@@ -670,10 +670,32 @@ def send_email(subject: str, body: str):
         log.error(f"send_email: {e}")
 
 # ============================================================
-# MAIN
+# === SCHEDULE GATE ADDED (KST 08:00 DAILY) ===
 # ============================================================
 
-def main():
+LAST_SENT_FILE = "/home/ubuntu/vella_v10/last_sent.txt"
+
+def get_last_sent_date() -> Optional[str]:
+    """마지막 발송 날짜 조회"""
+    try:
+        if os.path.exists(LAST_SENT_FILE):
+            with open(LAST_SENT_FILE, 'r') as f:
+                return f.read().strip()
+    except Exception as e:
+        log.error(f"get_last_sent_date: {e}")
+    return None
+
+def update_last_sent_date(date_str: str):
+    """마지막 발송 날짜 업데이트"""
+    try:
+        os.makedirs(os.path.dirname(LAST_SENT_FILE), exist_ok=True)
+        with open(LAST_SENT_FILE, 'w') as f:
+            f.write(date_str)
+    except Exception as e:
+        log.error(f"update_last_sent_date: {e}")
+
+def run_optimizer():
+    """기존 main() 로직 (백테스트 + 이메일 발송)"""
     log.info("VELLA_v9_OPTIMIZER START")
     
     # 데이터 조회
@@ -709,7 +731,8 @@ def main():
     shock = check_shock()
     
     # 이메일 생성
-    subject = f"VELLA OPTIMIZER Report - {datetime.now().strftime('%Y-%m-%d')}"
+    kst = timezone(timedelta(hours=9))
+    subject = f"VELLA OPTIMIZER Report - {datetime.now(kst).strftime('%Y-%m-%d')}"
     body = generate_email_body(long_results, short_results, shock)
     
     # 이메일 발송
@@ -717,5 +740,32 @@ def main():
     
     log.info("VELLA_v9_OPTIMIZER DONE")
 
+# ============================================================
+# MAIN (DAEMON MODE)
+# ============================================================
+
 if __name__ == "__main__":
-    main()
+    log.info("VELLA_v9_OPTIMIZER DAEMON START")
+    
+    while True:
+        try:
+            # UTC → KST 변환
+            utc_now = datetime.now(timezone.utc)
+            kst = timezone(timedelta(hours=9))
+            kst_now = utc_now.astimezone(kst)
+            
+            # KST 08:00 체크
+            if kst_now.hour == 8 and kst_now.minute == 0:
+                today_str = kst_now.strftime("%Y-%m-%d")
+                last_sent = get_last_sent_date()
+                
+                if last_sent != today_str:
+                    log.info(f"Schedule triggered: {today_str} 08:00 KST")
+                    run_optimizer()
+                    update_last_sent_date(today_str)
+            
+            time.sleep(30)  # 30초 대기
+            
+        except Exception as e:
+            log.error(f"daemon loop error: {e}")
+            time.sleep(30)
