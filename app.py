@@ -78,7 +78,7 @@ CFG = {
     # -------------------------
     "130_EMAIL_TO": "jktiger486@gmail.com",
     "131_EMAIL_FROM": "vella-optimizer@noreply.com",
-    "132_SMTP_HOST": "email-smtp.us-east-1.amazonaws.com",  # AWS SES
+    "132_SMTP_HOST": "email-smtp.ap-northeast-2.amazonaws.com",  # AWS SES
     "133_SMTP_PORT": 587,
     
     # -------------------------
