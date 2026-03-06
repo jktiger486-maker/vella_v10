@@ -1,6 +1,6 @@
 # ============================================================
-# VELLA_v10_OPTIMIZER — EMA Combination Finder (v2.8.4)
-# - PATCH: EMA warm-up 보존 / LONG E2 pullback 부호 / ATR 슬라이스 오염 제거
+# VELLA_v10_OPTIMIZER — EMA Combination Finder (v2.9.0)
+# - ARENA: fast+mid 기반 강화 / EXIT: 단일 EMA → CROSS EXIT / CFG 전면 정합
 # ============================================================
 
 import os
@@ -33,8 +33,9 @@ CFG = {
     ],
 
     "102_FAST_RANGE": [5, 10],
-    "103_MID_RANGE": [12, 24],
-    "104_EXIT_RANGE": [3, 6],
+    "103_MID_RANGE": [9, 24],
+    "108_X_FAST_RANGE": [3, 6],
+    "109_X_MID_RANGE":  [6, 12],
 
     "105_BACKTEST_DAYS": 4,
     "106_FETCH_EXTRA_DAYS": 1,
@@ -251,7 +252,8 @@ class BacktestResult:
     fast: int
     mid: int
     arena: int
-    exit_ema: int
+    exit_fast: int
+    exit_mid: int
     tolerance: float
     slope_threshold: float
     swing_lookback: int
@@ -275,7 +277,8 @@ def backtest_short(
     ema_fast_s: List[float],
     ema_mid_s: List[float],
     ema_arena_s: List[float],
-    ema_exit_s: List[float],
+    ema_exit_fast_s: List[float],
+    ema_exit_mid_s: List[float],
     tolerance: float,
     slope_threshold: float,
     swing_lookback: int,
@@ -297,7 +300,8 @@ def backtest_short(
             if bar == position['entry_bar']:
                 continue
 
-            if close_now > ema_exit_s[bar]:
+            # EXIT: EMA CROSS (exit_fast > exit_mid)
+            if ema_exit_fast_s[bar] > ema_exit_mid_s[bar]:
                 exit_price  = close_now
                 pnl_pct     = (position['entry_price'] - exit_price) / position['entry_price']
                 pnl_pct_net = pnl_pct - (fee_per_trade * 2)
@@ -319,7 +323,11 @@ def backtest_short(
                 continue  # 청산 bar 즉시 재진입 금지
 
         if position is None:
-            short_arena = ema_fast_s[bar] < ema_arena_s[bar]
+            # ARENA: fast < arena AND mid < arena
+            short_arena = (
+                (ema_fast_s[bar] < ema_arena_s[bar]) and
+                (ema_mid_s[bar]  < ema_arena_s[bar])
+            )
 
             slope_ok = False
             if bar >= swing_lookback:
@@ -342,6 +350,7 @@ def backtest_short(
                 e2_signal = pullback and reentry
 
             if short_arena and slope_ok and (e1_signal or e2_signal):
+                # entry_price는 완료봉 close 근사값 기준 (실가동 시장가 체결가와 미세 오차 있음)
                 position = {'entry_bar': bar, 'entry_price': close_now}
 
     if position is not None:
@@ -375,7 +384,8 @@ def backtest_long(
     ema_fast_s: List[float],
     ema_mid_s: List[float],
     ema_arena_s: List[float],
-    ema_exit_s: List[float],
+    ema_exit_fast_s: List[float],
+    ema_exit_mid_s: List[float],
     tolerance: float,
     slope_threshold: float,
     swing_lookback: int,
@@ -397,7 +407,8 @@ def backtest_long(
             if bar == position['entry_bar']:
                 continue
 
-            if close_now < ema_exit_s[bar]:
+            # EXIT: EMA CROSS (exit_fast < exit_mid)
+            if ema_exit_fast_s[bar] < ema_exit_mid_s[bar]:
                 exit_price  = close_now
                 pnl_pct     = (exit_price - position['entry_price']) / position['entry_price']
                 pnl_pct_net = pnl_pct - (fee_per_trade * 2)
@@ -419,7 +430,11 @@ def backtest_long(
                 continue  # 청산 bar 즉시 재진입 금지
 
         if position is None:
-            long_arena = ema_fast_s[bar] > ema_arena_s[bar]
+            # ARENA: fast > arena AND mid > arena
+            long_arena = (
+                (ema_fast_s[bar] > ema_arena_s[bar]) and
+                (ema_mid_s[bar]  > ema_arena_s[bar])
+            )
 
             slope_ok = False
             if bar >= swing_lookback:
@@ -442,6 +457,7 @@ def backtest_long(
                 e2_signal = pullback and reentry
 
             if long_arena and slope_ok and (e1_signal or e2_signal):
+                # entry_price는 완료봉 close 근사값 기준 (실가동 시장가 체결가와 미세 오차 있음)
                 position = {'entry_bar': bar, 'entry_price': close_now}
 
     if position is not None:
@@ -496,12 +512,13 @@ def optimize_symbol(symbol: str, direction: str, klines: List) -> Optional[Backt
     highs_trimmed  = highs[-backtest_bars:]
     lows_trimmed   = lows[-backtest_bars:]
 
-    fast_range  = range(CFG["102_FAST_RANGE"][0],  CFG["102_FAST_RANGE"][1]  + 1)
-    mid_range   = range(CFG["103_MID_RANGE"][0],   CFG["103_MID_RANGE"][1]   + 1)
-    exit_range  = range(CFG["104_EXIT_RANGE"][0],  CFG["104_EXIT_RANGE"][1]  + 1)
-    arena_range = range(CFG["150_ARENA_RANGE"][0], CFG["150_ARENA_RANGE"][1] + 1)
+    fast_range   = range(CFG["102_FAST_RANGE"][0],  CFG["102_FAST_RANGE"][1]  + 1)
+    mid_range    = range(CFG["103_MID_RANGE"][0],   CFG["103_MID_RANGE"][1]   + 1)
+    x_fast_range = range(CFG["108_X_FAST_RANGE"][0], CFG["108_X_FAST_RANGE"][1] + 1)
+    x_mid_range  = range(CFG["109_X_MID_RANGE"][0],  CFG["109_X_MID_RANGE"][1]  + 1)
+    arena_range  = range(CFG["150_ARENA_RANGE"][0], CFG["150_ARENA_RANGE"][1] + 1)
 
-    all_periods = set(fast_range) | set(mid_range) | set(exit_range) | set(arena_range)
+    all_periods = set(fast_range) | set(mid_range) | set(x_fast_range) | set(x_mid_range) | set(arena_range)
     ema_cache_full: Dict[int, List[float]] = {
         p: ema_series(closes, p) for p in all_periods
     }
@@ -531,43 +548,50 @@ def optimize_symbol(symbol: str, direction: str, klines: List) -> Optional[Backt
                 for tolerance in tolerance_range:
                     for slope_th in slope_range:
                         for swing_lb in swing_range:
-                            for exit_ema in exit_range:
-                                ema_exit_s = ema_cache[exit_ema]
+                            for exit_fast in x_fast_range:
+                                ema_exit_fast_s = ema_cache[exit_fast]
+                                for exit_mid in x_mid_range:
+                                    if exit_mid <= exit_fast:
+                                        continue
+                                    ema_exit_mid_s = ema_cache[exit_mid]
 
-                                if direction == "SHORT":
-                                    trades, mdd, net_return_ratio = backtest_short(
-                                        closes_trimmed, highs_trimmed, lows_trimmed,
-                                        ema_fast_s, ema_mid_s, ema_arena_s, ema_exit_s,
-                                        tolerance, slope_th, swing_lb,
-                                    )
-                                else:
-                                    trades, mdd, net_return_ratio = backtest_long(
-                                        closes_trimmed, highs_trimmed, lows_trimmed,
-                                        ema_fast_s, ema_mid_s, ema_arena_s, ema_exit_s,
-                                        tolerance, slope_th, swing_lb,
-                                    )
+                                    if direction == "SHORT":
+                                        trades, mdd, net_return_ratio = backtest_short(
+                                            closes_trimmed, highs_trimmed, lows_trimmed,
+                                            ema_fast_s, ema_mid_s, ema_arena_s,
+                                            ema_exit_fast_s, ema_exit_mid_s,
+                                            tolerance, slope_th, swing_lb,
+                                        )
+                                    else:
+                                        trades, mdd, net_return_ratio = backtest_long(
+                                            closes_trimmed, highs_trimmed, lows_trimmed,
+                                            ema_fast_s, ema_mid_s, ema_arena_s,
+                                            ema_exit_fast_s, ema_exit_mid_s,
+                                            tolerance, slope_th, swing_lb,
+                                        )
 
-                                if not trades:
-                                    continue
+                                    if not trades:
+                                        continue
 
-                                net_return_pct = net_return_ratio * 100
-                                trades_per_day = len(trades) / backtest_days
-                                wins           = sum(1 for t in trades if t.pnl_pct > 0)
-                                win_rate       = (wins / len(trades)) * 100 if trades else 0
-                                recent_2d      = calculate_recent_2d_price_change(closes, interval)
-                                score          = calculate_score(net_return_pct, mdd * 100, trades_per_day)
+                                    net_return_pct = net_return_ratio * 100
+                                    trades_per_day = len(trades) / backtest_days
+                                    wins           = sum(1 for t in trades if t.pnl_pct > 0)
+                                    win_rate       = (wins / len(trades)) * 100 if trades else 0
+                                    recent_2d      = calculate_recent_2d_price_change(closes, interval)
+                                    score          = calculate_score(net_return_pct, mdd * 100, trades_per_day)
 
-                                if score > best_score:
-                                    best_score  = score
-                                    best_result = BacktestResult(
-                                        symbol=symbol,
-                                        fast=fast, mid=mid, arena=arena, exit_ema=exit_ema,
-                                        tolerance=tolerance, slope_threshold=slope_th, swing_lookback=swing_lb,
-                                        net_return=net_return_pct, mdd=mdd * 100,
-                                        total_trades=len(trades), trades_per_day=trades_per_day,
-                                        win_rate=win_rate, recent_2d_price_change=recent_2d,
-                                        score=score, trades=trades
-                                    )
+                                    if score > best_score:
+                                        best_score  = score
+                                        best_result = BacktestResult(
+                                            symbol=symbol,
+                                            fast=fast, mid=mid, arena=arena,
+                                            exit_fast=exit_fast, exit_mid=exit_mid,
+                                            tolerance=tolerance, slope_threshold=slope_th, swing_lookback=swing_lb,
+                                            net_return=net_return_pct, mdd=mdd * 100,
+                                            total_trades=len(trades), trades_per_day=trades_per_day,
+                                            win_rate=win_rate, recent_2d_price_change=recent_2d,
+                                            score=score, trades=trades
+                                        )
 
     return best_result
 
@@ -634,7 +658,7 @@ def format_table_row(rank: int, result: BacktestResult) -> str:
     wr_flag = "⚠" if result.win_rate < 35 else ("★" if result.win_rate > 55 else "")
     return (
         f"{rank} | {result.symbol} | "
-        f"{result.fast} | {result.mid} | {result.arena} | {result.exit_ema} | "
+        f"{result.fast} | {result.mid} | {result.arena} | {result.exit_fast} | {result.exit_mid} | "
         f"tol={result.tolerance:.4f} | slp={result.slope_threshold:.4f} | sw={result.swing_lookback} | "
         f"{result.net_return:.2f}% | {result.mdd:.2f}% | {result.recent_2d_price_change:.2f}% | "
         f"{result.win_rate:.1f}%{wr_flag} | {result.total_trades} | {result.score:.2f}"
@@ -651,7 +675,7 @@ def generate_email_body(long_results: List[BacktestResult], short_results: List[
             "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
         ])
 
-    header = "순위 | 종목 | FAST | MID | ARENA | EXIT | tolerance | slope | swing | 4일Net | 4일MDD | 2일가격변동 | 승률 | 트레이드 | 점수"
+    header = "순위 | 종목 | FAST | MID | ARENA | X_FAST | X_MID | tolerance | slope | swing | 4일Net | 4일MDD | 2일가격변동 | 승률 | 트레이드 | 점수"
     sep    = "─────────────────────────────────────────────────────────────────"
 
     body.extend([
@@ -678,7 +702,7 @@ def generate_email_body(long_results: List[BacktestResult], short_results: List[
     body.extend([
         "",
         "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
-        "VELLA_v10_OPTIMIZER v2.8.4",
+        "VELLA_v10_OPTIMIZER v2.9.0",
         f"Generated: {datetime.now(timezone(timedelta(hours=9))).strftime('%Y-%m-%d %H:%M:%S')}",
         "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
     ])
