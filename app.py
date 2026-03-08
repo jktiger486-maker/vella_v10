@@ -32,10 +32,10 @@ CFG = {
         "RNDRUSDT", "ATOMUSDT", "NEARUSDT"
     ],
 
-    "102_FAST_RANGE": [5, 10],
-    "103_MID_RANGE": [9, 24],
-    "108_X_FAST_RANGE": [3, 6],
-    "109_X_MID_RANGE":  [6, 12],
+    "102_FAST_RANGE": [5, 8],
+    "103_MID_RANGE": [10, 14],
+    "108_X_FAST_RANGE": [4, 6],
+    "109_X_MID_RANGE":  [8, 11],
 
     "105_BACKTEST_DAYS": 4,
     "106_FETCH_EXTRA_DAYS": 1,
@@ -59,10 +59,10 @@ CFG = {
 
     "141_LOG_LEVEL": "INFO",
 
-    "150_ARENA_RANGE": [30, 50],
-    "151_TOUCH_TOLERANCE_RANGE": [0.0005, 0.001, 0.0015, 0.002, 0.0025, 0.003],
-    "152_SLOPE_THRESHOLD_RANGE": [0.0005, 0.001, 0.0015, 0.002, 0.0025, 0.003],
-    "153_SWING_LOOKBACK_RANGE": [3, 10],
+    "150_ARENA_RANGE": [30, 35],
+    "151_TOUCH_TOLERANCE_RANGE": [0.001, 0.002, 0.003],
+    "152_SLOPE_THRESHOLD_RANGE": [0.001, 0.002, 0.003],
+    "153_SWING_LOOKBACK_RANGE": [4, 7],
 }
 
 # ============================================================
@@ -202,7 +202,6 @@ def atr(highs: List[float], lows: List[float], closes: List[float], period: int)
     return sum(tr_list) / len(tr_list)
 
 def atr_series(highs: List[float], lows: List[float], closes: List[float], period: int) -> List[float]:
-    """Wilder RMA ATR 시리즈. 첫 유효 인덱스 = period-1."""
     n = len(closes)
     if n == 0:
         return []
@@ -300,7 +299,6 @@ def backtest_short(
             if bar == position['entry_bar']:
                 continue
 
-            # EXIT: EMA CROSS (exit_fast > exit_mid)
             if ema_exit_fast_s[bar] > ema_exit_mid_s[bar]:
                 exit_price  = close_now
                 pnl_pct     = (position['entry_price'] - exit_price) / position['entry_price']
@@ -320,10 +318,9 @@ def backtest_short(
                 max_dd  = max(max_dd, dd)
 
                 position = None
-                continue  # 청산 bar 즉시 재진입 금지
+                continue
 
         if position is None:
-            # ARENA: fast < arena AND mid < arena
             short_arena = (
                 (ema_fast_s[bar] < ema_arena_s[bar]) and
                 (ema_mid_s[bar]  < ema_arena_s[bar])
@@ -350,7 +347,6 @@ def backtest_short(
                 e2_signal = pullback and reentry
 
             if short_arena and slope_ok and (e1_signal or e2_signal):
-                # entry_price는 완료봉 close 근사값 기준 (실가동 시장가 체결가와 미세 오차 있음)
                 position = {'entry_bar': bar, 'entry_price': close_now}
 
     if position is not None:
@@ -407,7 +403,6 @@ def backtest_long(
             if bar == position['entry_bar']:
                 continue
 
-            # EXIT: EMA CROSS (exit_fast < exit_mid)
             if ema_exit_fast_s[bar] < ema_exit_mid_s[bar]:
                 exit_price  = close_now
                 pnl_pct     = (exit_price - position['entry_price']) / position['entry_price']
@@ -427,10 +422,9 @@ def backtest_long(
                 max_dd  = max(max_dd, dd)
 
                 position = None
-                continue  # 청산 bar 즉시 재진입 금지
+                continue
 
         if position is None:
-            # ARENA: fast > arena AND mid > arena
             long_arena = (
                 (ema_fast_s[bar] > ema_arena_s[bar]) and
                 (ema_mid_s[bar]  > ema_arena_s[bar])
@@ -457,7 +451,6 @@ def backtest_long(
                 e2_signal = pullback and reentry
 
             if long_arena and slope_ok and (e1_signal or e2_signal):
-                # entry_price는 완료봉 close 근사값 기준 (실가동 시장가 체결가와 미세 오차 있음)
                 position = {'entry_bar': bar, 'entry_price': close_now}
 
     if position is not None:
@@ -601,7 +594,6 @@ def optimize_symbol(symbol: str, direction: str, klines: List) -> Optional[Backt
 
 def check_shock() -> bool:
     try:
-        # 4h range 조건 — 미완성 캔들 회피
         klines_4h = fetch_klines("BTCUSDT", "4h", 1)
         if klines_4h and len(klines_4h) >= 1:
             k         = klines_4h[-2] if len(klines_4h) >= 2 else klines_4h[-1]
@@ -609,7 +601,6 @@ def check_shock() -> bool:
             if range_pct >= CFG["122_SHOCK_4H_RANGE_PCT"]:
                 return True
 
-        # 5m ATR 조건
         target_bars = 288 * 7 + 400
         klines_5m   = fetch_klines_paged("BTCUSDT", "5m", target_bars)
 
@@ -632,7 +623,6 @@ def check_shock() -> bool:
             atr_7d_avg = sum(valid) / len(valid)
 
             if atr_7d_avg > 0 and atr_now >= atr_7d_avg * CFG["120_SHOCK_ATR_MULTIPLIER"]:
-                # 1h volume 조건 — 미완성 캔들 회피
                 target_1h_bars = 24 * 7 + 10
                 klines_1h = fetch_klines_paged("BTCUSDT", "1h", target_1h_bars)
                 if klines_1h and len(klines_1h) >= 3:
@@ -811,7 +801,14 @@ if __name__ == "__main__":
             kst     = timezone(timedelta(hours=9))
             kst_now = utc_now.astimezone(kst)
 
-            if kst_now.hour == 8 and 0 <= kst_now.minute < 10:
+            # ▶ [수정] 스케줄 게이트: KST 06:00 ~ 08:30 사이에만 실행 허용
+            in_window = (
+                (kst_now.hour == 6 and kst_now.minute >= 0) or
+                (kst_now.hour == 7) or
+                (kst_now.hour == 8 and kst_now.minute <= 30)
+            )
+
+            if in_window:
                 today_str = kst_now.strftime("%Y-%m-%d")
                 last_sent = get_last_sent_date()
 
