@@ -21,17 +21,41 @@ from email.mime.text import MIMEText
 
 CFG = {
     "100_LONG_SYMBOLS": [
-        "BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT",
-        "XRPUSDT", "AVAXUSDT", "LINKUSDT",
-        "ADAUSDT", "DOGEUSDT", "SUIUSDT"
+    "BTCUSDT",
+    "ETHUSDT",
+    "XRPUSDT",
+    "BANANAUSDT",
+    "KITEUSDT",
+    "TRXUSDT",
+    "FETUSDT",
+    "SOLUSDT",
+    "BNBUSDT",
+    "WIFUSDT",
+    "SUIUSDT",
+    "NEARUSDT",
+    "PAXGUSDT",
+    "CCUSDT",
+    "ARCUSDT"
     ],
 
     "101_SHORT_SYMBOLS": [
-        "SEIUSDT", "WIFUSDT", "ARBUSDT", "OPUSDT",
-        "INJUSDT", "APTUSDT", "TIAUSDT",
-        "RNDRUSDT", "ATOMUSDT", "NEARUSDT"
+    "SEIUSDT",
+    "SUIUSDT",
+    "TIAUSDT",
+    "RONINUSDT",
+    "API3USDT",
+    "DYDXUSDT",
+    "LDOUSDT",
+    "GALAUSDT",
+    "BLURUSDT",
+    "OPUSDT",
+    "ARBUSDT",
+    "IMXUSDT",
+    "AVAXUSDT",
+    "POLYXUSDT",
+    "ANKRUSDT"
     ],
-
+    
     "102_FAST_RANGE": [5, 8],
     "103_MID_RANGE": [10, 14],
     "108_X_FAST_RANGE": [4, 6],
@@ -59,10 +83,10 @@ CFG = {
 
     "141_LOG_LEVEL": "INFO",
 
-    "150_ARENA_RANGE": [30, 35],
-    "151_TOUCH_TOLERANCE_RANGE": [0.001, 0.002, 0.003],
-    "152_SLOPE_THRESHOLD_RANGE": [0.001, 0.002, 0.003],
-    "153_SWING_LOOKBACK_RANGE": [4, 7],
+    "150_ARENA_RANGE": [30, 34, 35],
+    "151_TOUCH_TOLERANCE_RANGE": [0.001, 0.0015, 0.002, 0.003],
+    "152_SLOPE_THRESHOLD_RANGE": [0.001, 0.0015, 0.002, 0.003],
+    "153_SWING_LOOKBACK_RANGE": [4, 5, 6, 7],
 }
 
 # ============================================================
