@@ -5,23 +5,33 @@ VELLA RANGE LONG LADDER v10 FINAL (BR10 기준선)
 BR8 SHORT LADDER 기준선을 100% 유지하되 방향만 LONG으로 반전.
 
 [변환 내역]
-- SYMBOL: ARCUSDT
-- TOTAL_CAPITAL_USDT: 200.0
+- SYMBOL: ARIAUSDT
+- TOTAL_CAPITAL_USDT: 5000.0
 - 4H 필터: close > EMA15 (롱 허용)
 - 5M 트리거: EMA15 상향 돌파 (close[-1]>EMA15 + low[-2]<EMA15 + close[-1]>close[-2])
 - 진입: 1차 시장가 BUY / 2~10차 하단 LIMIT BUY
 - 청산: LIMIT SELL reduceOnly / MARKET SELL reduceOnly
 - pnl_pct: (current - avg) / avg
 - calc_exit_price: avg * (1 + fee*2 + target_pct)
-- 트레일링: trail_high 추적, 고점 대비 -1% 반락 시 청산
+- 트레일링: trail_high 추적, 고점 대비 -0.5% 반락 시 청산
 - 거미줄 무효화: 하단 이탈 시 (current < bottom_price * (1 - buffer))
 - sync: 롱 포지션(amt > 0) / BUY 주문 기준 복구
+
+[v10.1 패치 — BR8 개선사항 이식]
+- CFG["MARGIN_TYPE"] 추가: 엔진 시작 시 CROSS/ISOLATED 자동 설정
+- CFG 테마별 번호 구분 (10~80번대)
+- _fetch_5m_trigger_inputs 분리 + BarCache 정규화
+- _last_filled_check_ts: 봉당 1회 filled 체크 제한
+- set_margin_type() 예외 3분기 처리
+- EXIT 5구간 분기 (1~3 / 4~5 / 6~7 / 8~9 / 10)
+- HARD_SL_PCT 0.08 → 0.05
+- TRAILING_REBOUND_PCT 0.01 → 0.005
 
 EXIT 우선순위:
   1. HARD SL
   2. TIMEOUT
-  3. TP1 0.8% → 50% 부분청산 후 트레일링 전환
-  4. TRAIL EXIT: 고점 추적 → -1% 반락 시 전량 청산
+  3. TP1 1.2% → 50% 부분청산 후 트레일링 전환
+  4. TRAIL EXIT: 고점 추적 → -0.5% 반락 시 전량 청산
   ※ TP1 전: 지정가 EXIT 병행
   ※ TP1 후: 트레일링 EXIT 전용
 
@@ -56,44 +66,53 @@ ClientError = (BinanceAPIException, BinanceOrderException)
 # CFG
 # ============================================================
 CFG = {
-    "SYMBOL":              "ARIAUSDT",
+    # ── 10번대: 심볼 / 시간축 ──────────────────────────────
+    "SYMBOL":              "ETHUSDT",
     "INTERVAL_TRIGGER":    "5m",
     "INTERVAL_EXEC":       "5m",
     "INTERVAL_FILTER_HTF": "4h",
-    "EMA_TRIGGER_LEN":     15,
 
+    # ── 20번대: 트리거 / HTF 필터 ─────────────────────────
+    "EMA_TRIGGER_LEN":    15,
     "HTF_FILTER_EMA_LEN": 15,
     "HTF_FILTER_ENABLE":  True,
 
+    # ── 30번대: 자본 / 레버리지 / 마진 ───────────────────
     "TOTAL_CAPITAL_USDT": 5000.0,
     "LEVERAGE":           3,
+    "MARGIN_TYPE":        "CROSS",   # CROSS / ISOLATED
     "MAX_CAPITAL_RATIO":  0.95,
 
+    # ── 40번대: 거미줄 구조 ───────────────────────────────
     "LADDER_COUNT":   10,
-    "LADDER_GAP_PCT": 0.035,
+    "LADDER_GAP_PCT": 0.025,
     "SIZE_WEIGHTS": [
-        1.5, 1.4, 1.3, 1.2, 1.1,
-        1.0, 0.9, 0.8, 0.7, 0.6
+        0.6, 0.8, 1.1, 1.5, 2.0, 
+        1.2, 1.0, 0.8, 0.7, 0.6
     ],
-
-    "LADDER_INVALIDATION_MULT": 2.0,
-
-    "TP1_PROFIT_PCT":       0.012,
-    "TP1_PARTIAL_RATIO":    0.5,
-    "TRAILING_REBOUND_PCT": 0.01,
-
-    "FEE_PCT_ONEWAY":           0.0004,
-    "TARGET_PROFIT_STAGE_1_3":  0.004,
-    "TARGET_PROFIT_STAGE_4_7":  0.0020,
-    "TARGET_PROFIT_STAGE_8_10": -0.0010,
-    "EXIT_REPRICE_THRESHOLD_PCT": 0.003,
-
-    "DEEP_FILL_STAGE":         8,
-    "TIMEOUT_BARS_AFTER_DEEP": 12,
-    "HARD_SL_PCT":             0.08,
-
+    "LADDER_INVALIDATION_MULT":    2.0,
     "LADDER_NO_FILL_TIMEOUT_BARS": 12,
 
+    # ── 50번대: TP / 트레일링 ─────────────────────────────
+    "TP1_PROFIT_PCT":       0.01,
+    "TP1_PARTIAL_RATIO":    0.5,
+    "TRAILING_REBOUND_PCT": 0.005,
+
+    # ── 60번대: EXIT 가격 구조 ────────────────────────────
+    "FEE_PCT_ONEWAY":            0.0004,
+    "TARGET_PROFIT_STAGE_1_3":   0.012,   # 1~3차: TP1(1%) 백업
+    "TARGET_PROFIT_STAGE_4_5":   0.005,
+    "TARGET_PROFIT_STAGE_6_7":   0.003,
+    "TARGET_PROFIT_STAGE_8_9":   0.001,
+    "TARGET_PROFIT_STAGE_10":   -0.0008,
+    "EXIT_REPRICE_THRESHOLD_PCT": 0.003,
+
+    # ── 70번대: 리스크 / 타임아웃 ────────────────────────
+    "HARD_SL_PCT":             0.05,
+    "DEEP_FILL_STAGE":         8,
+    "TIMEOUT_BARS_AFTER_DEEP": 12,
+
+    # ── 80번대: 운영 / 루프 ───────────────────────────────
     "REENTRY_COOLDOWN_BARS":      8,
     "POLL_INTERVAL_SEC":          10,
     "BAR_CHECK_MIN_INTERVAL_SEC": 40,
@@ -159,6 +178,9 @@ class BinanceFuturesCompat:
 
     def change_leverage(self, symbol: str, leverage: int):
         return self._client.futures_change_leverage(symbol=symbol, leverage=leverage)
+
+    def change_margin_type(self, symbol: str, marginType: str):
+        return self._client.futures_change_margin_type(symbol=symbol, marginType=marginType)
 
     def ticker_price(self, symbol: str):
         return self._client.futures_symbol_ticker(symbol=symbol)
@@ -292,10 +314,10 @@ class BarCache:
         if self._cached_result is not None and \
                 (now - self._last_api_time) < self._min_interval:
             return self._cached_result, self._last_ts
-        closes, ts          = fetch_fn()
+        data, ts            = fetch_fn()
         self._last_api_time = now
         if ts != self._last_ts or self._cached_result is None:
-            self._cached_result = compute_fn(closes)
+            self._cached_result = compute_fn(data)
             self._last_ts       = ts
         return self._cached_result, ts
 
@@ -320,20 +342,22 @@ def check_4h_long_filter(symbol: str, cache: BarCache) -> bool:
     if not CFG["HTF_FILTER_ENABLE"]:
         return True
     period = CFG["HTF_FILTER_EMA_LEN"]
-    result, _ = cache.query(
-        fetch_fn=lambda: get_closed_bar_ts_with_closes(
+
+    def fetch():
+        closes, ts = get_closed_bar_ts_with_closes(
             symbol, CFG["INTERVAL_FILTER_HTF"], limit=period + 10
-        ),
-        compute_fn=_compute_4h_filter,
-    )
+        )
+        return closes, ts
+
+    result, _ = cache.query(fetch_fn=fetch, compute_fn=_compute_4h_filter)
     return result
 
 # ============================================================
-# 5M EMA15 상향 역전 트리거
+# 5M EMA15 상향 역전 트리거 (LONG)
 # 조건:
-#   1) close[-1] > ema15[-1]   — EMA15 상향 돌파
-#   2) low[-2]   < ema15[-2]   — 직전봉 저가가 EMA15 아래 (꺾이는 순간)
-#   3) close[-1] > close[-2]   — 상승 확정 1봉
+#   cond1 = closes[-1] > ema15[-1]   — EMA15 상향 돌파
+#   cond2 = lows[-2]   < ema15[-2]   — 직전봉 저가가 EMA15 아래
+#   cond3 = closes[-1] > closes[-2]  — 상승 확정 1봉
 # ============================================================
 
 
@@ -356,28 +380,28 @@ def _compute_5m_trigger(closes: list, lows: list) -> bool:
     return triggered
 
 
+def _fetch_5m_trigger_inputs(symbol: str, limit: int):
+    raw    = client.klines(symbol, CFG["INTERVAL_TRIGGER"], limit=limit + 1)
+    closed = raw[:-1]
+    closes = [float(k[4]) for k in closed]
+    lows   = [float(k[3]) for k in closed]
+    ts     = int(closed[-1][0]) if closed else 0
+    return closes, lows, ts
+
+
 def calc_ema15_trigger(symbol: str, cache: BarCache) -> tuple[bool, int]:
     period = CFG["EMA_TRIGGER_LEN"]
     limit  = period + 10
 
-    # closes+lows 동시 필요 → BarCache fetch_fn/compute_fn 구조로 래핑
-    # fetch_fn: (closes, ts) 반환 — BarCache 호환
-    # lows는 fetch 시점에 클로저로 캡처
-    _lows_buf: list = []
+    def fetch():
+        closes, lows, ts = _fetch_5m_trigger_inputs(symbol, limit)
+        return (closes, lows), ts
 
-    def _fetch():
-        nonlocal _lows_buf
-        raw    = client.klines(symbol, CFG["INTERVAL_TRIGGER"], limit=limit + 1)
-        closed = raw[:-1]
-        _lows_buf = [float(k[3]) for k in closed]
-        closes    = [float(k[4]) for k in closed]
-        ts        = int(closed[-1][0]) if closed else 0
-        return closes, ts
+    def compute(data):
+        closes, lows = data
+        return _compute_5m_trigger(closes, lows)
 
-    def _compute(closes: list) -> bool:
-        return _compute_5m_trigger(closes, _lows_buf)
-
-    result, ts = cache.query(fetch_fn=_fetch, compute_fn=_compute)
+    result, ts = cache.query(fetch_fn=fetch, compute_fn=compute)
     return result, ts
 
 # ============================================================
@@ -396,7 +420,7 @@ def has_long_position(pos: dict) -> bool:
     return pos["amt"] > 0.0001
 
 # ============================================================
-# 주문 유틸 (모듈 레벨)
+# 주문 유틸
 # ============================================================
 
 
@@ -506,6 +530,22 @@ def set_leverage(symbol: str, leverage: int):
     except ClientError as e:
         log.warning(f"레버리지 설정 오류: {e}")
 
+
+def set_margin_type(symbol: str, margin_type: str):
+    try:
+        mt = "CROSSED" if margin_type.upper() == "CROSS" else "ISOLATED"
+        client.change_margin_type(symbol=symbol, marginType=mt)
+        log.info(f"마진 타입 {mt} 설정 완료")
+    except ClientError as e:
+        msg = str(e)
+        if "No need to change margin type" in msg:
+            log.info(f"마진 타입 이미 {mt} 상태")
+        elif "cannot be changed if there exists position" in msg or "cannot be changed if open orders exist" in msg:
+            log.warning(f"마진 타입 변경 불가: 포지션/주문 존재 | 요청={mt} | {e}")
+        else:
+            log.error(f"마진 타입 설정 실패: 요청={mt} | {e}")
+            raise
+
 # ============================================================
 # 사이즈 / 가격 계산
 # ============================================================
@@ -530,8 +570,10 @@ def calc_ladder_quantities(total_capital: float, leverage: float,
 
 def get_stage_target_pct(stage: int) -> float:
     if stage <= 3: return CFG["TARGET_PROFIT_STAGE_1_3"]
-    if stage <= 7: return CFG["TARGET_PROFIT_STAGE_4_7"]
-    return CFG["TARGET_PROFIT_STAGE_8_10"]
+    if stage <= 5: return CFG["TARGET_PROFIT_STAGE_4_5"]
+    if stage <= 7: return CFG["TARGET_PROFIT_STAGE_6_7"]
+    if stage <= 9: return CFG["TARGET_PROFIT_STAGE_8_9"]
+    return CFG["TARGET_PROFIT_STAGE_10"]
 
 
 def calc_exit_price(avg_price: float, stage: int) -> float:
@@ -594,6 +636,7 @@ class RangeLongEngine:
         self._last_position_amt            = 0.0
 
         self._closing_in_progress: bool = False
+        self._last_filled_check_ts: int  = 0   # 봉당 1회 filled 체크 제한
 
         self.bars_after_deep  = 0
         self.cooldown_bars    = 0
@@ -608,6 +651,7 @@ class RangeLongEngine:
         self._trigger_cache = BarCache(min_interval_sec=min_iv)
 
         load_symbol_filters(self.symbol)
+        set_margin_type(self.symbol, CFG["MARGIN_TYPE"])
         set_leverage(self.symbol, CFG["LEVERAGE"])
 
     # --------------------------------------------------------
@@ -650,7 +694,7 @@ class RangeLongEngine:
         pos         = get_position(self.symbol)
         open_orders = get_open_orders(self.symbol)
         buy_orders  = [o for o in open_orders if o["side"] == "BUY" and o["status"] == "NEW"]
-        buy_sorted  = sorted(buy_orders, key=lambda x: float(x["price"]), reverse=True)  # 높은가 → 낮은가
+        buy_sorted  = sorted(buy_orders, key=lambda x: float(x["price"]), reverse=True)
 
         if has_long_position(pos):
             log.info("[SYNC] 롱 포지션 감지 → POSITION_HOLD 복구")
@@ -691,7 +735,6 @@ class RangeLongEngine:
                     "price":    float(o["price"]),
                     "qty":      float(o["origQty"]),
                 })
-            # 1차(가장 높은 가격)가 entry_price_base
             self.entry_price_base = float(buy_sorted[0]["price"])
             log.info(f"[SYNC] entry_price_base = {self.entry_price_base:.4f} (max BUY price)")
 
@@ -704,7 +747,7 @@ class RangeLongEngine:
     # --------------------------------------------------------
     def run(self):
         log.info("=" * 60)
-        log.info("VELLA RANGE LONG LADDER v10 FINAL 시작")
+        log.info("VELLA RANGE LONG LADDER v10.1 시작")
         log.info(f"심볼: {self.symbol} | 자본: {CFG['TOTAL_CAPITAL_USDT']} USDT | 레버: {CFG['LEVERAGE']}x")
         log.info("=" * 60)
         self._sync_on_start()
@@ -802,12 +845,19 @@ class RangeLongEngine:
             position_qty = pos["amt"]
 
             amt_changed = abs(position_qty - self._last_position_amt) > 0.0001
-            if amt_changed or self.max_filled_stage == 0 or new_bar:
+            cur_bar_ts  = self.bar_tracker.last_ts or 0
+            need_check  = (
+                amt_changed
+                or (new_bar and cur_bar_ts != self._last_filled_check_ts)
+                or self.max_filled_stage == 0
+            )
+            if need_check:
                 filled = self._count_filled_stages()
                 if filled > self.max_filled_stage:
                     log.info(f"체결 단계 갱신: {self.max_filled_stage} → {filled}")
                     self.max_filled_stage = filled
-                self._last_position_amt = position_qty
+                self._last_position_amt    = position_qty
+                self._last_filled_check_ts = cur_bar_ts
 
             log.info(
                 f"HOLD | avg={avg_price:.4f} | price={current_price:.4f} | "
@@ -848,13 +898,13 @@ class RangeLongEngine:
 
                 if current_price <= self.trail_high * (1 - CFG["TRAILING_REBOUND_PCT"]):
                     log.info(
-                        f"[TRAIL EXIT] 고점={self.trail_high:.4f} 대비 -1% 반락 "
+                        f"[TRAIL EXIT] 고점={self.trail_high:.4f} 대비 -0.5% 반락 "
                         f"(current={current_price:.4f})"
                     )
                     self._final_close(symbol, position_qty, "TRAIL")
                 return
 
-            # 5. 지정가 EXIT 동기화 (closing 중에는 생략)
+            # 5. 지정가 EXIT 동기화
             if not self._closing_in_progress:
                 self._sync_exit_order(symbol, avg_price, position_qty)
 
@@ -1030,6 +1080,7 @@ class RangeLongEngine:
         self._canceled_order_ids    = set()
         self._last_position_amt     = 0.0
         self._closing_in_progress   = False
+        self._last_filled_check_ts  = 0
         self.tp1_done               = False
         self.trail_high             = None
 
