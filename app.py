@@ -70,7 +70,7 @@ CFG = {
     "MAX_CAPITAL_RATIO":  0.95,
 
     "LADDER_COUNT":   10,
-    "LADDER_GAP_PCT": 0.04,
+    "LADDER_GAP_PCT": 0.035,
     "SIZE_WEIGHTS": [
         1.5, 1.4, 1.3, 1.2, 1.1,
         1.0, 0.9, 0.8, 0.7, 0.6
@@ -78,7 +78,7 @@ CFG = {
 
     "LADDER_INVALIDATION_MULT": 2.0,
 
-    "TP1_PROFIT_PCT":       0.008,
+    "TP1_PROFIT_PCT":       0.012,
     "TP1_PARTIAL_RATIO":    0.5,
     "TRAILING_REBOUND_PCT": 0.01,
 
