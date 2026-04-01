@@ -67,7 +67,7 @@ ClientError = (BinanceAPIException, BinanceOrderException)
 # ============================================================
 CFG = {
     # ── 10번대: 심볼 / 시간축 ──────────────────────────────
-    "SYMBOL":              "ETHUSDT",
+    "SYMBOL":              "ADAUSDT",
     "INTERVAL_TRIGGER":    "5m",
     "INTERVAL_EXEC":       "5m",
     "INTERVAL_FILTER_HTF": "4h",
@@ -85,7 +85,7 @@ CFG = {
 
     # ── 40번대: 거미줄 구조 ───────────────────────────────
     "LADDER_COUNT":   10,
-    "LADDER_GAP_PCT": 0.025,
+    "LADDER_GAP_PCT": 0.03,
     "SIZE_WEIGHTS": [
         0.6, 0.8, 1.1, 1.5, 2.0, 
         1.2, 1.0, 0.8, 0.7, 0.6
