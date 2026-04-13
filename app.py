@@ -1,44 +1,39 @@
 """
 ============================================================
-VELLA RANGE LONG LADDER v10 FINAL (BR10 기준선)
+VELLA RANGE LONG LADDER v10.7 (BR10 기준선 — 실전 투입 최종)
 ============================================================
-BR8 SHORT LADDER 기준선을 100% 유지하되 방향만 LONG으로 반전.
+BR10 v10.1 기준선 유지 + 거미줄 작전 철학 완전 반영.
 
-[변환 내역]
-- SYMBOL: ARIAUSDT
-- TOTAL_CAPITAL_USDT: 5000.0
-- 4H 필터: close > EMA15 (롱 허용)
-- 5M 트리거: EMA15 상향 돌파 (close[-1]>EMA15 + low[-2]<EMA15 + close[-1]>close[-2])
-- 진입: 1차 시장가 BUY / 2~10차 하단 LIMIT BUY
-- 청산: LIMIT SELL reduceOnly / MARKET SELL reduceOnly
-- pnl_pct: (current - avg) / avg
-- calc_exit_price: avg * (1 + fee*2 + target_pct)
-- 트레일링: trail_high 추적, 고점 대비 -0.5% 반락 시 청산
-- 거미줄 무효화: 하단 이탈 시 (current < bottom_price * (1 - buffer))
-- sync: 롱 포지션(amt > 0) / BUY 주문 기준 복구
+[v10.2 패치 내역]
+1. HARD SL → 10단 체결 완료 후에만 avg 기준 -7% 발동 (1~9단 완전 비활성)
+2. TIMEOUT → 사실상 제거 (DEEP_FILL_STAGE=99, TIMEOUT_BARS=99999)
+3. LADDER INVALIDATION → 완전 비활성화 (주석 처리)
+4. TARGET PROFIT 단계별 상향:
+   - 4~5단: 0.5% → 0.8%
+   - 6~7단: 0.3% → 0.6%
+   - 8~9단: 0.1% → 0.4%
+   - 10단:  -0.08% → +0.3%
+5. LADDER_GAP_PCT: 3% → 5%
+6. SIZE_WEIGHTS: 중간 봉우리형 재설계
+   [0.5, 0.7, 1.0, 1.4, 1.8, 1.4, 1.0, 0.8, 0.6, 0.5]
 
-[v10.1 패치 — BR8 개선사항 이식]
-- CFG["MARGIN_TYPE"] 추가: 엔진 시작 시 CROSS/ISOLATED 자동 설정
-- CFG 테마별 번호 구분 (10~80번대)
-- _fetch_5m_trigger_inputs 분리 + BarCache 정규화
-- _last_filled_check_ts: 봉당 1회 filled 체크 제한
-- set_margin_type() 예외 3분기 처리
-- EXIT 5구간 분기 (1~3 / 4~5 / 6~7 / 8~9 / 10)
-- HARD_SL_PCT 0.08 → 0.05
-- TRAILING_REBOUND_PCT 0.01 → 0.005
+거미줄 작전 핵심 철학:
+  - 1~9단: 무조건 버팀. SL/TIMEOUT/INVALIDATION 없음.
+  - 10단 체결 후: avg 기준 -7% 최후 방어선 1개만 존재.
+  - 평단이 완성될수록 작은 반등으로도 수익 탈출 가능.
 
 EXIT 우선순위:
-  1. HARD SL
-  2. TIMEOUT
-  3. TP1 1.2% → 50% 부분청산 후 트레일링 전환
+  1. HARD SL (10단 체결 완료 후에만)
+  2. TIMEOUT (사실상 비활성)
+  3. TP1 1.0% → 50% 부분청산 후 트레일링 전환
   4. TRAIL EXIT: 고점 추적 → -0.5% 반락 시 전량 청산
   ※ TP1 전: 지정가 EXIT 병행
   ※ TP1 후: 트레일링 EXIT 전용
 
 상태 머신:
   WATCHING       — 포지션 없음. 4H 필터 + 5M 트리거 대기.
-  LADDER_ACTIVE  — 거미줄 배치 완료. 체결 및 무효화 감시.
-  POSITION_HOLD  — 포지션 존재. EXIT 동기화 및 강제종료 관리.
+  LADDER_ACTIVE  — 거미줄 배치 완료. 체결 감시 (무효화 없음).
+  POSITION_HOLD  — 포지션 존재. EXIT 동기화 및 최후 방어 관리.
   COOLDOWN       — 청산 완료 후 재진입 금지 대기.
 
 재시작 sync:
@@ -67,7 +62,7 @@ ClientError = (BinanceAPIException, BinanceOrderException)
 # ============================================================
 CFG = {
     # ── 10번대: 심볼 / 시간축 ──────────────────────────────
-    "SYMBOL":              "ADAUSDT",
+    "SYMBOL":              "BTCUSDT",
     "INTERVAL_TRIGGER":    "5m",
     "INTERVAL_EXEC":       "5m",
     "INTERVAL_FILTER_HTF": "4h",
@@ -78,20 +73,20 @@ CFG = {
     "HTF_FILTER_ENABLE":  True,
 
     # ── 30번대: 자본 / 레버리지 / 마진 ───────────────────
-    "TOTAL_CAPITAL_USDT": 8000.0,
+    "TOTAL_CAPITAL_USDT": 6000.0,
     "LEVERAGE":           3,
     "MARGIN_TYPE":        "CROSS",   # CROSS / ISOLATED
     "MAX_CAPITAL_RATIO":  0.95,
 
     # ── 40번대: 거미줄 구조 ───────────────────────────────
     "LADDER_COUNT":   10,
-    "LADDER_GAP_PCT": 0.03,
+    "LADDER_GAP_PCT": 0.05,          # v10.2: 3% → 5%
     "SIZE_WEIGHTS": [
-        0.6, 0.8, 1.1, 1.5, 2.0, 
-        1.2, 1.0, 0.8, 0.7, 0.6
+        0.5, 0.7, 1.0, 1.4, 1.8,    # v10.2: 중간 봉우리형
+        1.4, 1.0, 0.8, 0.6, 0.5
     ],
-    "LADDER_INVALIDATION_MULT":    2.0,
-    "LADDER_NO_FILL_TIMEOUT_BARS": 12,
+    "LADDER_INVALIDATION_MULT":    2.0,   # 비활성화됨 (코드에서 차단)
+    "LADDER_NO_FILL_TIMEOUT_BARS": 99999, # v10.3: INVALIDATION 우회 방지 — 사실상 제거
 
     # ── 50번대: TP / 트레일링 ─────────────────────────────
     "TP1_PROFIT_PCT":       0.01,
@@ -100,17 +95,17 @@ CFG = {
 
     # ── 60번대: EXIT 가격 구조 ────────────────────────────
     "FEE_PCT_ONEWAY":            0.0004,
-    "TARGET_PROFIT_STAGE_1_3":   0.012,   # 1~3차: TP1(1%) 백업
-    "TARGET_PROFIT_STAGE_4_5":   0.005,
-    "TARGET_PROFIT_STAGE_6_7":   0.003,
-    "TARGET_PROFIT_STAGE_8_9":   0.001,
-    "TARGET_PROFIT_STAGE_10":   -0.0008,
-    "EXIT_REPRICE_THRESHOLD_PCT": 0.003,
+    "TARGET_PROFIT_STAGE_1_3":   0.012,   # 1~3단: 1.2% 유지
+    "TARGET_PROFIT_STAGE_4_5":   0.008,   # v10.2: 0.5% → 0.8%
+    "TARGET_PROFIT_STAGE_6_7":   0.006,   # v10.2: 0.3% → 0.6%
+    "TARGET_PROFIT_STAGE_8_9":   0.004,   # v10.2: 0.1% → 0.4%
+    "TARGET_PROFIT_STAGE_10":    0.003,   # v10.2: -0.08% → +0.3%
+    "EXIT_REPRICE_THRESHOLD_PCT": 0.006,   # v10.3: GAP 5% 구조 과민 방지
 
     # ── 70번대: 리스크 / 타임아웃 ────────────────────────
-    "HARD_SL_PCT":             0.05,
-    "DEEP_FILL_STAGE":         8,
-    "TIMEOUT_BARS_AFTER_DEEP": 12,
+    "HARD_SL_PCT":             0.07,   # v10.2: 5% → 7% / 10단 체결 후에만 발동
+    "DEEP_FILL_STAGE":         99,     # v10.2: TIMEOUT 사실상 제거
+    "TIMEOUT_BARS_AFTER_DEEP": 99999,  # v10.2: TIMEOUT 사실상 제거
 
     # ── 80번대: 운영 / 루프 ───────────────────────────────
     "REENTRY_COOLDOWN_BARS":      8,
@@ -636,7 +631,7 @@ class RangeLongEngine:
         self._last_position_amt            = 0.0
 
         self._closing_in_progress: bool = False
-        self._last_filled_check_ts: int  = 0   # 봉당 1회 filled 체크 제한
+        self._last_filled_check_ts: int  = 0
 
         self.bars_after_deep  = 0
         self.cooldown_bars    = 0
@@ -747,8 +742,9 @@ class RangeLongEngine:
     # --------------------------------------------------------
     def run(self):
         log.info("=" * 60)
-        log.info("VELLA RANGE LONG LADDER v10.1 시작")
+        log.info("VELLA RANGE LONG LADDER v10.7 시작")
         log.info(f"심볼: {self.symbol} | 자본: {CFG['TOTAL_CAPITAL_USDT']} USDT | 레버: {CFG['LEVERAGE']}x")
+        log.info(f"GAP: {CFG['LADDER_GAP_PCT']*100:.0f}% | HARD_SL: {CFG['HARD_SL_PCT']*100:.0f}%(10단 후)")
         log.info("=" * 60)
         self._sync_on_start()
         while True:
@@ -821,12 +817,8 @@ class RangeLongEngine:
                 self.state = "WATCHING"
                 return
 
-            if self._is_ladder_invalid(current_price):
-                log.warning("거미줄 무효화: 하단 이탈 → BUY 취소 후 WATCHING")
-                self._cancel_ladder_orders()
-                self._reset_ladder()
-                self.state = "WATCHING"
-                return
+            # v10.2: LADDER INVALIDATION 완전 비활성화
+            # (거미줄 작전 철학 — 10단 끝까지 버팀)
 
             log.info(f"거미줄 대기 | 현재가: {current_price:.4f}")
             return
@@ -868,13 +860,16 @@ class RangeLongEngine:
 
             pnl_pct = (current_price - avg_price) / avg_price
 
-            # 1. HARD SL
-            if pnl_pct < -CFG["HARD_SL_PCT"]:
-                log.warning(f"HARD SL 발동 | 손실 {pnl_pct*100:.2f}%")
+            # 1. HARD SL — v10.2: 10단 체결 완료 후에만 발동
+            if (self.max_filled_stage >= CFG["LADDER_COUNT"]
+                    and pnl_pct < -CFG["HARD_SL_PCT"]):
+                log.warning(
+                    f"HARD SL 발동 | 10단 완료 후 avg 기준 손실 {pnl_pct*100:.2f}%"
+                )
                 self._final_close(symbol, position_qty, "HARD_SL")
                 return
 
-            # 2. TIMEOUT
+            # 2. TIMEOUT — v10.2: 사실상 비활성 (DEEP_FILL_STAGE=99)
             if self.max_filled_stage >= CFG["DEEP_FILL_STAGE"]:
                 if new_bar:
                     self.bars_after_deep += 1
@@ -905,7 +900,9 @@ class RangeLongEngine:
                 return
 
             # 5. 지정가 EXIT 동기화
-            if not self._closing_in_progress:
+            # v10.5: 2단 이상 체결 후에만 EXIT 생성
+            # → 1단 체결 직후 조기 exit 배치 방지
+            if not self._closing_in_progress and self.max_filled_stage >= 2:
                 self._sync_exit_order(symbol, avg_price, position_qty)
 
     # --------------------------------------------------------
@@ -927,14 +924,15 @@ class RangeLongEngine:
             self._cancel_ladder_orders()
             self.ladder_orders     = []
             self._filled_order_ids = set()
-            self.max_filled_stage  = 0
+            # v10.3: max_filled_stage 유지 — TP1 후에도 stage 기반 EXIT 정확도 보존
+            # (0으로 리셋하면 이후 EXIT가 항상 1단 기준으로 계산되는 버그 방지)
 
             self._last_position_amt = pos["amt"]
             self.tp1_done   = True
             self.trail_high = None
             log.info(
                 f"[TP1] 부분청산 성공 → tp1_done=True | "
-                f"잔량={pos['amt']:.4f} | trail_high=None(다음 tick 세팅)"
+                f"잔량={pos['amt']:.4f} | stage={self.max_filled_stage} 유지 | trail_high=None"
             )
         else:
             log.error("[TP1] 부분청산 실패 → 기존 주문 유지, 다음 tick 재시도")
@@ -966,6 +964,11 @@ class RangeLongEngine:
     # 거미줄 배치 — 1차 시장가 BUY, 2~10차 하단 LIMIT BUY
     # --------------------------------------------------------
     def _deploy_ladder(self, current_price: float):
+        # v10.4: 중복 거미줄 차단 — WATCHING 상태에서만 진입 허용
+        if self.state != "WATCHING":
+            log.warning(f"_deploy_ladder 차단: state={self.state} (WATCHING 아님)")
+            return
+
         symbol  = self.symbol
         count   = CFG["LADDER_COUNT"]
         gap     = CFG["LADDER_GAP_PCT"]
@@ -979,7 +982,7 @@ class RangeLongEngine:
         self._reset_ladder()
         self.entry_price_base = current_price
 
-        log.info(f"거미줄 배치 | 기준가: {current_price:.4f} | {count}단계")
+        log.info(f"거미줄 배치 | 기준가: {current_price:.4f} | {count}단계 | GAP={gap*100:.0f}%")
         success = 0
 
         # 1차: 시장가 즉시 진입
@@ -1017,17 +1020,9 @@ class RangeLongEngine:
         else:
             log.info(f"거미줄 배치 완료: {success}/{count}개 → LADDER_ACTIVE")
             self.no_fill_bars = 0
-            self.state = "POSITION_HOLD" if order_1st else "LADDER_ACTIVE"
-
-    # --------------------------------------------------------
-    # 거미줄 무효화 (롱: 하단 이탈)
-    # --------------------------------------------------------
-    def _is_ladder_invalid(self, current_price: float) -> bool:
-        if not self.entry_price_base or not self.ladder_orders:
-            return False
-        bottom_price = self.ladder_orders[-1]["price"]
-        buffer_pct   = CFG["LADDER_GAP_PCT"] * CFG["LADDER_INVALIDATION_MULT"]
-        return current_price < bottom_price * (1 - buffer_pct)
+            # v10.6: 1차 체결 여부 무관하게 LADDER_ACTIVE 고정
+            # → POSITION_HOLD 직행 금지 / 반드시 LADDER_ACTIVE 거침
+            self.state = "LADDER_ACTIVE"
 
     # --------------------------------------------------------
     # 지정가 EXIT 동기화
@@ -1041,8 +1036,10 @@ class RangeLongEngine:
         need_replace = (
             not self.exit_order_ids
             or stage != self.last_stage
-            or abs(exit_price - self.last_exit_price) > exit_price * threshold
-            or abs(exit_qty   - self.last_exit_qty)   > exit_qty   * 0.05
+            or (self.last_exit_price > 0
+                and abs(exit_price - self.last_exit_price) > self.last_exit_price * threshold)
+            or (self.last_exit_qty > 0
+                and abs(exit_qty - self.last_exit_qty) > self.last_exit_qty * 0.05)
         )
 
         if not need_replace:
