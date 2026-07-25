@@ -98,7 +98,7 @@ CFG = {
 
     # ── 40번대: 거미줄 구조 ───────────────────────────────
     "LADDER_COUNT":   10,
-    "LADDER_GAP_PCT": 0.06,          # v8.9: 5% → 6%
+    "LADDER_GAP_PCT": 0.07,          # v8.9: 5% → 7%
     "SIZE_WEIGHTS": [
         0.5, 0.7, 1.0, 1.4, 1.8,
         1.4, 1.0, 0.8, 0.6, 0.5
@@ -107,24 +107,24 @@ CFG = {
     "LADDER_NO_FILL_TIMEOUT_BARS": 99999,
 
     # ── 50번대: TP / 트레일링 ─────────────────────────────
-    "TP1_PROFIT_PCT":              0.015,
-    "TP1_PARTIAL_RATIO":           0.25,
+    "TP1_PROFIT_PCT":              0.05,
+    "TP1_PARTIAL_RATIO":           0.5,
     "TRAILING_REBOUND_PCT":        0.004,  # TP1 후 트레일링 (1~7단)
     "TRAILING_REBOUND_STAGE_DEEP": 0.005,  # v8.9: deep trail 반등 기준 (노이즈 보정)
-    "STAGE_TRAILING_FROM":         8,      # v8.9: 8단 이상 deep trail
+    "STAGE_TRAILING_FROM":         99,      # v8.9: 8단 이상 deep trail
     "DEEP_TRAIL_ACTIVATE_DROP_PCT":0.012,  # v8.9: 0.8% 하락 시 trail 활성 (노이즈 보정)
 
     # ── 60번대: EXIT 가격 구조 ────────────────────────────
     "FEE_PCT_ONEWAY":            0.0004,
-    "TARGET_PROFIT_STAGE_1_3":   0.016,
-    "TARGET_PROFIT_STAGE_4_5":   0.012,
-    "TARGET_PROFIT_STAGE_6_7":   0.009,
-    "TARGET_PROFIT_STAGE_8_9":   0.006,
-    "TARGET_PROFIT_STAGE_10":    0.005,
+    "TARGET_PROFIT_STAGE_1_3":   0.06,
+    "TARGET_PROFIT_STAGE_4_5":   0.06,
+    "TARGET_PROFIT_STAGE_6_7":   0.06,
+    "TARGET_PROFIT_STAGE_8_9":   0.06,
+    "TARGET_PROFIT_STAGE_10":    0.06,
     "EXIT_REPRICE_THRESHOLD_PCT": 0.006,
 
     # ── 70번대: 리스크 / 타임아웃 ────────────────────────
-    "HARD_SL_PCT":             0.05,
+    "HARD_SL_PCT":             0.6,
     "SL_TICK_BUFFER":          0.003,
     "CAPITAL_CHECK_MIN_RATIO": 0.80,
     "CAPITAL_CHECK_MAX_RATIO": 1.10,
